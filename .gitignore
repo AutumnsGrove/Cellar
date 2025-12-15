@@ -1,5 +1,47 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+.svelte-kit/
+build/
+dist/
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
 secrets.json
+.dev.vars
+
+# Cloudflare
+.wrangler/
+.mf/
+
+# Logs
 *.log
-__pycache__/
+logs/
+
+# OS files
 .DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Cache
+__pycache__/
+.cache/
+
+# Claude Code
 .claude/
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Misc
+*.local

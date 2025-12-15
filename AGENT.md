@@ -5,17 +5,25 @@
 ---
 
 ## Project Purpose
-[Fill in: What this project does - 1-2 sentences]
+Cellar is Grove's unified storage management system. Every file users upload—blog images, email attachments, profile pictures—lives in the same root cellar, organized and accessible from one place. It provides visibility into storage usage, file management, bulk exports, and storage add-on purchases.
 
 ## Tech Stack
-[Fill in: Technologies, frameworks, and languages used]
-- Language:
-- Framework:
-- Key Libraries:
-- Package Manager:
+- **Language:** TypeScript
+- **Frontend:** SvelteKit (SSR, matches Grove stack)
+- **Backend:** Cloudflare Workers
+- **Storage:** Cloudflare R2
+- **Database:** Cloudflare D1 (SQLite)
+- **Auth:** Heartwood (Grove SSO)
+- **Payments:** Stripe (storage add-ons)
+- **Package Manager:** pnpm
 
 ## Architecture Notes
-[Fill in: Key architectural decisions, patterns, or structure]
+- **Unified Storage Pool:** All Grove products (Blog, Ivy email, Profile, Themes) share one R2 bucket per user
+- **R2 Key Structure:** `{user_id}/{product}/{category}/{file_id}` enables efficient listing and access control
+- **Quota System:** Tier-based storage (1GB-100GB) with purchasable add-ons ($1-7/mo)
+- **Soft Delete:** 30-day trash retention before permanent deletion
+- **Export System:** Streamed zip generation via Durable Objects to handle large exports (50GB+)
+- **Cron Jobs:** Daily cleanup of expired trash and exports
 
 ---
 
@@ -173,5 +181,5 @@ For all detailed guides, workflows, and examples, see:
 
 ---
 
-*Last updated: 2025-11-28*
-*Model: Claude Sonnet 4.5*
+*Last updated: 2025-12-15*
+*Model: Claude Opus 4.5*
