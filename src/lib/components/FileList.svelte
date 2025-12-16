@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { StorageFile } from '$types';
+  import Icon from './Icons.svelte';
 
   interface Props {
     files: StorageFile[];
@@ -42,15 +43,14 @@
     });
   }
 
-  function getFileIcon(mimeType: string): string {
-    if (mimeType.startsWith('image/')) return '🖼️';
-    if (mimeType.startsWith('video/')) return '🎬';
-    if (mimeType.startsWith('audio/')) return '🎵';
-    if (mimeType === 'application/pdf') return '📄';
-    if (mimeType.includes('zip') || mimeType.includes('7z')) return '📦';
-    if (mimeType.includes('font')) return '🔤';
-    if (mimeType.includes('text') || mimeType.includes('markdown')) return '📝';
-    return '📁';
+  function getFileIcon(mimeType: string): 'image' | 'video' | 'audio' | 'document' | 'archive' | 'file' | 'folder' {
+    if (mimeType.startsWith('image/')) return 'image';
+    if (mimeType.startsWith('video/')) return 'video';
+    if (mimeType.startsWith('audio/')) return 'audio';
+    if (mimeType === 'application/pdf') return 'document';
+    if (mimeType.includes('zip') || mimeType.includes('7z')) return 'archive';
+    if (mimeType.includes('text') || mimeType.includes('markdown')) return 'document';
+    return 'file';
   }
 
   const allSelected = $derived(files.length > 0 && files.every((f) => selectedIds.has(f.id)));
@@ -59,73 +59,68 @@
 <div class="file-list">
   {#if files.length === 0}
     <div class="empty-state">
-      <span class="text-4xl">📂</span>
-      <p class="text-gray-500 mt-2">No files found</p>
+      <Icon name="folder" size={32} />
+      <p>No files found</p>
     </div>
   {:else}
-    <table class="w-full">
+    <table>
       <thead>
-        <tr class="border-b border-gray-200">
-          <th class="text-left p-3 w-8">
+        <tr>
+          <th>
             <input
               type="checkbox"
               checked={allSelected}
               onchange={() => onSelectAll?.()}
-              class="rounded"
             />
           </th>
-          <th class="text-left p-3">Name</th>
-          <th class="text-left p-3 hidden md:table-cell">Product</th>
-          <th class="text-left p-3 hidden sm:table-cell">Size</th>
-          <th class="text-left p-3 hidden lg:table-cell">Date</th>
-          <th class="text-right p-3">Actions</th>
+          <th>Name</th>
+          <th class="hide-md">Product</th>
+          <th class="hide-sm">Size</th>
+          <th class="hide-lg">Date</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody>
         {#each files as file (file.id)}
-          <tr
-            class="border-b border-gray-100 hover:bg-gray-50 transition-colors"
-            class:bg-blue-50={selectedIds.has(file.id)}
-          >
-            <td class="p-3">
+          <tr class:selected={selectedIds.has(file.id)}>
+            <td>
               <input
                 type="checkbox"
                 checked={selectedIds.has(file.id)}
                 onchange={() => onSelect?.(file)}
-                class="rounded"
               />
             </td>
-            <td class="p-3">
-              <div class="flex items-center gap-2">
-                <span class="text-lg">{getFileIcon(file.mime_type)}</span>
+            <td>
+              <div class="file-name-cell">
+                <Icon name={getFileIcon(file.mime_type)} size={18} />
                 <div>
-                  <p class="font-medium text-sm truncate max-w-xs" title={file.filename}>
+                  <p title={file.filename}>
                     {file.filename}
                   </p>
-                  <p class="text-xs text-gray-500 md:hidden">{file.product}</p>
+                  <p class="product-mobile">{file.product}</p>
                 </div>
               </div>
             </td>
-            <td class="p-3 hidden md:table-cell">
-              <span class="px-2 py-1 text-xs rounded-full bg-gray-100 text-gray-700">
+            <td class="hide-md">
+              <span class="badge">
                 {file.product}
               </span>
             </td>
-            <td class="p-3 text-sm text-gray-600 hidden sm:table-cell">
+            <td class="hide-sm">
               {formatBytes(file.size_bytes)}
             </td>
-            <td class="p-3 text-sm text-gray-600 hidden lg:table-cell">
+            <td class="hide-lg">
               {formatDate(file.deleted_at || file.created_at)}
             </td>
-            <td class="p-3 text-right">
-              <div class="flex gap-1 justify-end">
+            <td class="actions-cell">
+              <div class="actions">
                 {#if showRestore}
                   <button
                     class="action-btn"
                     title="Restore"
                     onclick={() => onRestore?.(file)}
                   >
-                    ↩️
+                    <Icon name="refresh" size={18} />
                   </button>
                 {:else}
                   <button
@@ -133,7 +128,7 @@
                     title="Download"
                     onclick={() => onDownload?.(file)}
                   >
-                    ⬇️
+                    <Icon name="download" size={18} />
                   </button>
                 {/if}
                 <button
@@ -141,7 +136,7 @@
                   title="Delete"
                   onclick={() => onDelete?.(file)}
                 >
-                  🗑️
+                  <Icon name="trash" size={18} />
                 </button>
               </div>
             </td>
@@ -154,9 +149,9 @@
 
 <style>
   .file-list {
-    background: white;
-    border-radius: 0.75rem;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    background: var(--color-bg-secondary);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-md);
     overflow: hidden;
   }
 
@@ -165,24 +160,146 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 4rem;
-    background: #fafafa;
+    padding: var(--space-16);
+    background: var(--color-bg-tertiary);
+    gap: var(--space-4);
+    color: var(--color-text-secondary);
+  }
+
+  .empty-state p {
+    font-size: var(--text-sm);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+  }
+
+  thead {
+    background: var(--color-bg-tertiary);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  th {
+    padding: var(--space-3);
+    text-align: left;
+    font-weight: var(--font-medium);
+    color: var(--color-text-secondary);
+  }
+
+  th:last-child {
+    text-align: right;
+  }
+
+  td {
+    padding: var(--space-3);
+    border-bottom: 1px solid var(--color-border-subtle);
+    color: var(--color-text-primary);
+  }
+
+  tbody tr {
+    transition: background-color var(--transition-fast);
+  }
+
+  tbody tr:hover {
+    background: var(--color-bg-hover);
+  }
+
+  tbody tr.selected {
+    background: var(--color-primary-muted);
+  }
+
+  input[type="checkbox"] {
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+    accent-color: var(--color-primary);
+  }
+
+  .file-name-cell {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .file-name-cell > div {
+    flex: 1;
+  }
+
+  .file-name-cell p {
+    margin: 0;
+    color: var(--color-text-primary);
+    font-weight: var(--font-medium);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 20rem;
+  }
+
+  .product-mobile {
+    font-size: var(--text-xs) !important;
+    color: var(--color-text-secondary) !important;
+    font-weight: var(--font-normal) !important;
+    margin-top: var(--space-1) !important;
+  }
+
+  .badge {
+    display: inline-block;
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--text-xs);
+    border-radius: var(--radius-full);
+    background: var(--color-bg-elevated);
+    color: var(--color-text-secondary);
+  }
+
+  .actions-cell {
+    text-align: right;
+  }
+
+  .actions {
+    display: flex;
+    gap: var(--space-1);
+    justify-content: flex-end;
   }
 
   .action-btn {
-    padding: 0.25rem 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-1);
     border: none;
-    background: none;
+    background: transparent;
     cursor: pointer;
-    border-radius: 0.25rem;
-    transition: background 0.2s;
+    border-radius: var(--radius-md);
+    transition: background-color var(--transition-fast);
+    color: var(--color-text-secondary);
   }
 
   .action-btn:hover {
-    background: #e5e7eb;
+    background: var(--color-bg-elevated);
+    color: var(--color-text-primary);
   }
 
   .action-btn.danger:hover {
-    background: #fee2e2;
+    background: var(--color-error-muted);
+    color: var(--color-error);
+  }
+
+  @media (max-width: 768px) {
+    .hide-md {
+      display: none;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .hide-sm {
+      display: none;
+    }
+  }
+
+  @media (max-width: 1024px) {
+    .hide-lg {
+      display: none;
+    }
   }
 </style>

@@ -7,6 +7,9 @@ import type { StorageFile, QuotaStatus, UsageBreakdown, StorageExport } from '$t
 
 const API_BASE = '/api/storage';
 
+// Use mock data when no backend is available
+const USE_MOCK_DATA = true;
+
 interface ApiResponse<T> {
   data?: T;
   error?: string;
@@ -28,14 +31,111 @@ async function request<T>(
     const data = await response.json();
 
     if (!response.ok) {
-      return { error: data.error || 'Request failed' };
+      return { error: (data as { error?: string }).error || 'Request failed' };
     }
 
-    return { data };
+    return { data: data as T };
   } catch (err) {
     return { error: err instanceof Error ? err.message : 'Network error' };
   }
 }
+
+// ============== Mock Data ==============
+
+const MOCK_FILES: StorageFile[] = [
+  {
+    id: '1',
+    user_id: 'user1',
+    r2_key: 'user1/blog/images/sunset.jpg',
+    filename: 'sunset.jpg',
+    mime_type: 'image/jpeg',
+    size_bytes: 2456789,
+    product: 'blog',
+    category: 'images',
+    created_at: '2024-12-10T10:30:00Z',
+    updated_at: '2024-12-10T10:30:00Z'
+  },
+  {
+    id: '2',
+    user_id: 'user1',
+    r2_key: 'user1/ivy/attachments/document.pdf',
+    filename: 'quarterly-report.pdf',
+    mime_type: 'application/pdf',
+    size_bytes: 1234567,
+    product: 'ivy',
+    category: 'attachments',
+    created_at: '2024-12-09T14:20:00Z',
+    updated_at: '2024-12-09T14:20:00Z'
+  },
+  {
+    id: '3',
+    user_id: 'user1',
+    r2_key: 'user1/profile/avatar/profile.png',
+    filename: 'profile.png',
+    mime_type: 'image/png',
+    size_bytes: 456789,
+    product: 'profile',
+    category: 'avatar',
+    created_at: '2024-12-08T09:15:00Z',
+    updated_at: '2024-12-08T09:15:00Z'
+  },
+  {
+    id: '4',
+    user_id: 'user1',
+    r2_key: 'user1/blog/images/hero-banner.png',
+    filename: 'hero-banner.png',
+    mime_type: 'image/png',
+    size_bytes: 3456789,
+    product: 'blog',
+    category: 'images',
+    created_at: '2024-12-07T16:45:00Z',
+    updated_at: '2024-12-07T16:45:00Z'
+  },
+  {
+    id: '5',
+    user_id: 'user1',
+    r2_key: 'user1/themes/assets/custom-font.woff2',
+    filename: 'custom-font.woff2',
+    mime_type: 'font/woff2',
+    size_bytes: 89012,
+    product: 'themes',
+    category: 'assets',
+    created_at: '2024-12-05T11:00:00Z',
+    updated_at: '2024-12-05T11:00:00Z'
+  }
+];
+
+const MOCK_TRASH: StorageFile[] = [
+  {
+    id: '99',
+    user_id: 'user1',
+    r2_key: 'user1/blog/images/old-photo.jpg',
+    filename: 'old-photo.jpg',
+    mime_type: 'image/jpeg',
+    size_bytes: 1567890,
+    product: 'blog',
+    category: 'images',
+    created_at: '2024-11-20T08:00:00Z',
+    updated_at: '2024-12-01T12:00:00Z',
+    deleted_at: '2024-12-14T09:30:00Z'
+  }
+];
+
+const MOCK_QUOTA: QuotaStatus = {
+  used_bytes: 7693946,
+  total_bytes: 1073741824,
+  total_gb: 1,
+  available_bytes: 1066047878,
+  percentage: 0.72,
+  warning_level: 'none'
+};
+
+const MOCK_BREAKDOWN: UsageBreakdown[] = [
+  { product: 'blog', category: 'images', bytes: 5913578, file_count: 2 },
+  { product: 'ivy', category: 'attachments', bytes: 1234567, file_count: 1 },
+  { product: 'profile', category: 'avatar', bytes: 456789, file_count: 1 },
+  { product: 'themes', category: 'assets', bytes: 89012, file_count: 1 }
+];
 
 // ============== Storage Info ==============
 
@@ -45,6 +145,9 @@ export interface StorageInfoResponse {
 }
 
 export async function getStorageInfo(): Promise<ApiResponse<StorageInfoResponse>> {
+  if (USE_MOCK_DATA) {
+    return { data: { quota: MOCK_QUOTA, breakdown: MOCK_BREAKDOWN } };
+  }
   return request<StorageInfoResponse>('');
 }
 
@@ -68,6 +171,17 @@ export interface FilesOptions {
 }
 
 export async function getFiles(options: FilesOptions = {}): Promise<ApiResponse<FilesResponse>> {
+  if (USE_MOCK_DATA) {
+    let files = [...MOCK_FILES];
+    if (options.product) {
+      files = files.filter((f) => f.product === options.product);
+    }
+    if (options.search) {
+      const search = options.search.toLowerCase();
+      files = files.filter((f) => f.filename.toLowerCase().includes(search));
+    }
+    return { data: { files, total: files.length, limit: 50, offset: 0 } };
+  }
   const params = new URLSearchParams();
   if (options.product) params.set('product', options.product);
   if (options.category) params.set('category', options.category);
@@ -105,6 +219,10 @@ export interface TrashResponse {
 }
 
 export async function getTrash(): Promise<ApiResponse<TrashResponse>> {
+  if (USE_MOCK_DATA) {
+    const total_size = MOCK_TRASH.reduce((sum, f) => sum + f.size_bytes, 0);
+    return { data: { files: MOCK_TRASH, total_size } };
+  }
   return request<TrashResponse>('/trash');
 }
 

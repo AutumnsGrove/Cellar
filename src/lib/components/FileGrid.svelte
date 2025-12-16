@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { StorageFile } from '$types';
+  import Icon from './Icons.svelte';
 
   interface Props {
     files: StorageFile[];
@@ -36,15 +37,14 @@
     });
   }
 
-  function getFileIcon(mimeType: string): string {
-    if (mimeType.startsWith('image/')) return '🖼️';
-    if (mimeType.startsWith('video/')) return '🎬';
-    if (mimeType.startsWith('audio/')) return '🎵';
-    if (mimeType === 'application/pdf') return '📄';
-    if (mimeType.includes('zip') || mimeType.includes('7z')) return '📦';
-    if (mimeType.includes('font')) return '🔤';
-    if (mimeType.includes('text') || mimeType.includes('markdown')) return '📝';
-    return '📁';
+  function getFileIcon(mimeType: string): 'image' | 'video' | 'audio' | 'document' | 'archive' | 'file' {
+    if (mimeType.startsWith('image/')) return 'image';
+    if (mimeType.startsWith('video/')) return 'video';
+    if (mimeType.startsWith('audio/')) return 'audio';
+    if (mimeType === 'application/pdf') return 'document';
+    if (mimeType.includes('zip') || mimeType.includes('7z')) return 'archive';
+    if (mimeType.includes('text') || mimeType.includes('markdown')) return 'document';
+    return 'file';
   }
 
   function isImage(mimeType: string): boolean {
@@ -55,11 +55,11 @@
 <div class="file-grid">
   {#if files.length === 0}
     <div class="empty-state">
-      <span class="text-4xl">📂</span>
-      <p class="text-gray-500 mt-2">No files found</p>
+      <Icon name="folder" size={48} />
+      <p class="empty-text">No files found</p>
     </div>
   {:else}
-    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+    <div class="files-container">
       {#each files as file (file.id)}
         <div
           class="file-card"
@@ -76,15 +76,9 @@
             onclick={(e) => { e.stopPropagation(); onPreview?.(file); }}
             onkeypress={(e) => { if (e.key === 'Enter') { e.stopPropagation(); onPreview?.(file); } }}
           >
-            {#if isImage(file.mime_type)}
-              <div class="image-placeholder">
-                <span class="text-3xl">{getFileIcon(file.mime_type)}</span>
-              </div>
-            {:else}
-              <div class="icon-placeholder">
-                <span class="text-3xl">{getFileIcon(file.mime_type)}</span>
-              </div>
-            {/if}
+            <div class="icon-placeholder">
+              <Icon name={getFileIcon(file.mime_type)} size={48} />
+            </div>
           </div>
 
           <div class="file-info">
@@ -102,14 +96,14 @@
               title="Download"
               onclick={(e) => { e.stopPropagation(); onDownload?.(file); }}
             >
-              ⬇️
+              <Icon name="download" size={16} />
             </button>
             <button
               class="action-btn danger"
               title="Delete"
               onclick={(e) => { e.stopPropagation(); onDelete?.(file); }}
             >
-              🗑️
+              <Icon name="trash" size={16} />
             </button>
           </div>
         </div>
@@ -120,7 +114,7 @@
 
 <style>
   .file-grid {
-    padding: 1rem;
+    padding: var(--space-4);
   }
 
   .empty-state {
@@ -128,91 +122,126 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 4rem;
-    background: #fafafa;
-    border-radius: 0.75rem;
+    padding: var(--space-16);
+    background: var(--color-bg-secondary);
+    border-radius: var(--radius-xl);
+    color: var(--color-text-secondary);
+  }
+
+  .empty-text {
+    margin-top: var(--space-2);
+    color: var(--color-text-secondary);
+  }
+
+  .files-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: var(--space-4);
   }
 
   .file-card {
-    background: white;
-    border: 1px solid #e5e7eb;
-    border-radius: 0.75rem;
+    background: var(--color-bg-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-xl);
     overflow: hidden;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: all var(--transition-base);
+    display: flex;
+    flex-direction: column;
   }
 
   .file-card:hover {
-    border-color: #3b82f6;
-    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.15);
+    border-color: var(--color-primary);
+    box-shadow: 0 2px 8px var(--color-primary-muted);
+  }
+
+  .file-card:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   .file-card.selected {
-    border-color: #3b82f6;
-    background: #eff6ff;
+    border-color: var(--color-primary);
+    background: var(--color-bg-elevated);
   }
 
   .file-preview {
     aspect-ratio: 4/3;
-    background: #f3f4f6;
+    background: var(--color-bg-tertiary);
     display: flex;
     align-items: center;
     justify-content: center;
+    flex-shrink: 0;
   }
 
-  .image-placeholder,
   .icon-placeholder {
     display: flex;
     align-items: center;
     justify-content: center;
     width: 100%;
     height: 100%;
+    color: var(--color-text-secondary);
   }
 
   .file-info {
-    padding: 0.75rem;
-    border-top: 1px solid #e5e7eb;
+    padding: var(--space-3);
+    border-top: 1px solid var(--color-border-subtle);
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
   }
 
   .filename {
-    font-size: 0.875rem;
-    font-weight: 500;
+    font-size: var(--text-sm);
+    font-weight: var(--font-medium);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    color: var(--color-text-primary);
   }
 
   .file-meta {
-    font-size: 0.75rem;
-    color: #6b7280;
-    margin-top: 0.25rem;
+    font-size: var(--text-xs);
+    color: var(--color-text-tertiary);
+    margin-top: var(--space-1);
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
     align-items: center;
   }
 
   .file-actions {
     display: flex;
-    gap: 0.5rem;
-    padding: 0.5rem 0.75rem;
-    border-top: 1px solid #e5e7eb;
-    background: #fafafa;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-top: 1px solid var(--color-border-subtle);
+    background: var(--color-bg-tertiary);
   }
 
   .action-btn {
-    padding: 0.25rem 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-1);
     border: none;
     background: none;
     cursor: pointer;
-    border-radius: 0.25rem;
-    transition: background 0.2s;
+    border-radius: var(--radius-md);
+    transition: background var(--transition-fast), color var(--transition-fast);
+    color: var(--color-text-secondary);
   }
 
   .action-btn:hover {
-    background: #e5e7eb;
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+  }
+
+  .action-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -2px;
   }
 
   .action-btn.danger:hover {
-    background: #fee2e2;
+    background: var(--color-error-muted);
+    color: var(--color-error);
   }
 </style>

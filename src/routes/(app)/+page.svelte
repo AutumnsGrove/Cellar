@@ -1,467 +1,467 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import StorageMeter from '$lib/components/StorageMeter.svelte';
-  import UsageBreakdown from '$lib/components/UsageBreakdown.svelte';
-  import FileGrid from '$lib/components/FileGrid.svelte';
-  import FileList from '$lib/components/FileList.svelte';
-  import TrashBin from '$lib/components/TrashBin.svelte';
-  import AddStorageModal from '$lib/components/AddStorageModal.svelte';
-  import * as api from '$lib/api';
-  import type { QuotaStatus, UsageBreakdown as UsageBreakdownType, StorageFile } from '$types';
+	import { onMount } from 'svelte';
+	import StorageMeter from '$lib/components/StorageMeter.svelte';
+	import UsageBreakdown from '$lib/components/UsageBreakdown.svelte';
+	import AddStorageModal from '$lib/components/AddStorageModal.svelte';
+	import Icon from '$lib/components/Icons.svelte';
+	import * as api from '$lib/api';
+	import type { QuotaStatus, UsageBreakdown as UsageBreakdownType, StorageFile } from '$types';
 
-  // State
-  let loading = $state(true);
-  let error = $state<string | null>(null);
+	// State
+	let loading = $state(true);
+	let error = $state<string | null>(null);
 
-  // Storage data
-  let quota = $state<QuotaStatus | null>(null);
-  let breakdown = $state<UsageBreakdownType[]>([]);
-  let files = $state<StorageFile[]>([]);
-  let totalFiles = $state(0);
-  let trashFiles = $state<StorageFile[]>([]);
-  let trashSize = $state(0);
+	// Storage data
+	let quota = $state<QuotaStatus | null>(null);
+	let breakdown = $state<UsageBreakdownType[]>([]);
+	let recentFiles = $state<StorageFile[]>([]);
+	let totalFiles = $state(0);
+	let trashCount = $state(0);
 
-  // UI state
-  let activeTab = $state<'files' | 'trash'>('files');
-  let viewMode = $state<'grid' | 'list'>('grid');
-  let selectedIds = $state<Set<string>>(new Set());
-  let showAddStorageModal = $state(false);
-  let productFilter = $state<string>('');
-  let searchQuery = $state('');
-  let sortBy = $state<'created_at' | 'size_bytes' | 'filename'>('created_at');
-  let sortOrder = $state<'asc' | 'desc'>('desc');
+	// UI state
+	let showAddStorageModal = $state(false);
 
-  // Load data
-  async function loadData() {
-    loading = true;
-    error = null;
+	// Load data
+	async function loadData() {
+		loading = true;
+		error = null;
 
-    try {
-      const [storageRes, filesRes, trashRes] = await Promise.all([
-        api.getStorageInfo(),
-        api.getFiles({ product: productFilter || undefined, search: searchQuery || undefined, sort: sortBy, order: sortOrder }),
-        api.getTrash()
-      ]);
+		try {
+			const [storageRes, filesRes, trashRes] = await Promise.all([
+				api.getStorageInfo(),
+				api.getFiles({ sort: 'created_at', order: 'desc' }),
+				api.getTrash()
+			]);
 
-      if (storageRes.error) throw new Error(storageRes.error);
-      if (filesRes.error) throw new Error(filesRes.error);
-      if (trashRes.error) throw new Error(trashRes.error);
+			if (storageRes.error) throw new Error(storageRes.error);
+			if (filesRes.error) throw new Error(filesRes.error);
+			if (trashRes.error) throw new Error(trashRes.error);
 
-      quota = storageRes.data!.quota;
-      breakdown = storageRes.data!.breakdown;
-      files = filesRes.data!.files;
-      totalFiles = filesRes.data!.total;
-      trashFiles = trashRes.data!.files;
-      trashSize = trashRes.data!.total_size;
-    } catch (err) {
-      error = err instanceof Error ? err.message : 'Failed to load data';
-    } finally {
-      loading = false;
-    }
-  }
+			quota = storageRes.data!.quota;
+			breakdown = storageRes.data!.breakdown;
+			recentFiles = filesRes.data!.files.slice(0, 6);
+			totalFiles = filesRes.data!.total;
+			trashCount = trashRes.data!.files.length;
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to load data';
+		} finally {
+			loading = false;
+		}
+	}
 
-  // File actions
-  async function handleDelete(file: StorageFile) {
-    const res = await api.deleteFile(file.id);
-    if (res.error) {
-      alert(res.error);
-      return;
-    }
-    await loadData();
-  }
+	async function handlePurchaseAddon(addonType: string) {
+		const res = await api.purchaseAddon(addonType);
+		if (res.error) {
+			alert(res.error);
+			return;
+		}
+		if (res.data?.redirect_url) {
+			window.location.href = res.data.redirect_url;
+		}
+		showAddStorageModal = false;
+	}
 
-  async function handleRestore(file: StorageFile) {
-    const res = await api.restoreFile(file.id);
-    if (res.error) {
-      alert(res.error);
-      return;
-    }
-    await loadData();
-  }
-
-  async function handlePermanentDelete(file: StorageFile) {
-    if (!confirm(`Permanently delete "${file.filename}"? This cannot be undone.`)) return;
-
-    const res = await api.permanentlyDeleteFile(file.id);
-    if (res.error) {
-      alert(res.error);
-      return;
-    }
-    await loadData();
-  }
-
-  async function handleEmptyTrash() {
-    const res = await api.emptyTrash();
-    if (res.error) {
-      alert(res.error);
-      return;
-    }
-    await loadData();
-  }
-
-  function handleDownload(file: StorageFile) {
-    const url = api.getDownloadUrl(file.r2_key);
-    window.open(url, '_blank');
-  }
-
-  function handleSelect(file: StorageFile) {
-    const newSelected = new Set(selectedIds);
-    if (newSelected.has(file.id)) {
-      newSelected.delete(file.id);
-    } else {
-      newSelected.add(file.id);
-    }
-    selectedIds = newSelected;
-  }
-
-  function handleSelectAll() {
-    if (selectedIds.size === files.length) {
-      selectedIds = new Set();
-    } else {
-      selectedIds = new Set(files.map((f) => f.id));
-    }
-  }
-
-  async function handlePurchaseAddon(addonType: string) {
-    const res = await api.purchaseAddon(addonType);
-    if (res.error) {
-      alert(res.error);
-      return;
-    }
-    // Redirect to checkout
-    if (res.data?.redirect_url) {
-      window.location.href = res.data.redirect_url;
-    }
-    showAddStorageModal = false;
-  }
-
-  // Reactive search/filter
-  $effect(() => {
-    // Re-fetch when filters change
-    if (!loading) {
-      loadData();
-    }
-  });
-
-  onMount(() => {
-    loadData();
-  });
+	onMount(() => {
+		loadData();
+	});
 </script>
 
 <svelte:head>
-  <title>Amber - Storage Management</title>
+	<title>Dashboard - Amber</title>
 </svelte:head>
 
 <div class="dashboard">
-  <header class="header">
-    <div>
-      <h1 class="text-2xl font-bold">Amber</h1>
-      <p class="text-gray-600">Your Grove storage, organized</p>
-    </div>
-    <div class="header-actions">
-      <button class="btn btn-secondary" onclick={() => loadData()}>
-        🔄 Refresh
-      </button>
-      <button class="btn btn-primary" onclick={() => (showAddStorageModal = true)}>
-        + Add Storage
-      </button>
-    </div>
-  </header>
+	<div class="page-header">
+		<div>
+			<h1>Dashboard</h1>
+			<p class="subtitle">Your Grove storage at a glance</p>
+		</div>
+		<div class="header-actions">
+			<button class="btn btn-secondary" onclick={() => loadData()}>
+				<Icon name="refresh" size={16} />
+				<span>Refresh</span>
+			</button>
+			<button class="btn btn-primary" onclick={() => (showAddStorageModal = true)}>
+				<Icon name="plus" size={16} />
+				<span>Add Storage</span>
+			</button>
+		</div>
+	</div>
 
-  {#if error}
-    <div class="error-banner">
-      <span>⚠️ {error}</span>
-      <button onclick={() => (error = null)}>×</button>
-    </div>
-  {/if}
+	{#if error}
+		<div class="error-banner">
+			<span>{error}</span>
+			<button onclick={() => (error = null)}>
+				<Icon name="x" size={16} />
+			</button>
+		</div>
+	{/if}
 
-  {#if loading && !quota}
-    <div class="loading">
-      <span class="spinner"></span>
-      <p>Loading your storage...</p>
-    </div>
-  {:else if quota}
-    <div class="overview">
-      <div class="overview-left">
-        <StorageMeter {quota} />
-      </div>
-      <div class="overview-right">
-        <UsageBreakdown {breakdown} totalBytes={quota.used_bytes} />
-      </div>
-    </div>
+	{#if loading && !quota}
+		<div class="loading">
+			<div class="spinner"></div>
+			<p>Loading your storage...</p>
+		</div>
+	{:else if quota}
+		<!-- Storage Overview -->
+		<div class="overview-grid">
+			<div class="card storage-card">
+				<StorageMeter {quota} />
+			</div>
+			<div class="card breakdown-card">
+				<UsageBreakdown {breakdown} totalBytes={quota.used_bytes} />
+			</div>
+		</div>
 
-    <div class="tabs">
-      <button
-        class="tab"
-        class:active={activeTab === 'files'}
-        onclick={() => (activeTab = 'files')}
-      >
-        📁 Files ({totalFiles})
-      </button>
-      <button
-        class="tab"
-        class:active={activeTab === 'trash'}
-        onclick={() => (activeTab = 'trash')}
-      >
-        🗑️ Trash ({trashFiles.length})
-      </button>
-    </div>
+		<!-- Quick Stats -->
+		<div class="stats-grid">
+			<a href="/files" class="stat-card">
+				<div class="stat-icon">
+					<Icon name="folder" size={24} />
+				</div>
+				<div class="stat-content">
+					<span class="stat-value">{totalFiles}</span>
+					<span class="stat-label">Total Files</span>
+				</div>
+			</a>
+			<a href="/trash" class="stat-card">
+				<div class="stat-icon trash">
+					<Icon name="trash" size={24} />
+				</div>
+				<div class="stat-content">
+					<span class="stat-value">{trashCount}</span>
+					<span class="stat-label">In Trash</span>
+				</div>
+			</a>
+			<div class="stat-card">
+				<div class="stat-icon storage">
+					<Icon name="storage" size={24} />
+				</div>
+				<div class="stat-content">
+					<span class="stat-value">{quota.total_gb} GB</span>
+					<span class="stat-label">Total Storage</span>
+				</div>
+			</div>
+		</div>
 
-    {#if activeTab === 'files'}
-      <div class="toolbar">
-        <div class="toolbar-left">
-          <input
-            type="search"
-            placeholder="Search files..."
-            bind:value={searchQuery}
-            class="search-input"
-          />
-          <select bind:value={productFilter} class="filter-select">
-            <option value="">All Products</option>
-            <option value="blog">Blog</option>
-            <option value="ivy">Email (Ivy)</option>
-            <option value="profile">Profile</option>
-            <option value="themes">Themes</option>
-          </select>
-        </div>
-        <div class="toolbar-right">
-          <select bind:value={sortBy} class="filter-select">
-            <option value="created_at">Date</option>
-            <option value="size_bytes">Size</option>
-            <option value="filename">Name</option>
-          </select>
-          <button
-            class="view-btn"
-            class:active={viewMode === 'grid'}
-            onclick={() => (viewMode = 'grid')}
-            title="Grid view"
-          >
-            ▦
-          </button>
-          <button
-            class="view-btn"
-            class:active={viewMode === 'list'}
-            onclick={() => (viewMode = 'list')}
-            title="List view"
-          >
-            ☰
-          </button>
-        </div>
-      </div>
-
-      {#if viewMode === 'grid'}
-        <FileGrid
-          {files}
-          {selectedIds}
-          onSelect={handleSelect}
-          onDelete={handleDelete}
-          onDownload={handleDownload}
-        />
-      {:else}
-        <FileList
-          {files}
-          {selectedIds}
-          onSelect={handleSelect}
-          onSelectAll={handleSelectAll}
-          onDelete={handleDelete}
-          onDownload={handleDownload}
-        />
-      {/if}
-    {:else}
-      <TrashBin
-        files={trashFiles}
-        totalSize={trashSize}
-        onRestore={handleRestore}
-        onDelete={handlePermanentDelete}
-        onEmptyTrash={handleEmptyTrash}
-      />
-    {/if}
-  {/if}
+		<!-- Recent Files -->
+		{#if recentFiles.length > 0}
+			<div class="section">
+				<div class="section-header">
+					<h2>Recent Files</h2>
+					<a href="/files" class="view-all">
+						View all
+						<Icon name="chevron-right" size={16} />
+					</a>
+				</div>
+				<div class="recent-files-grid">
+					{#each recentFiles as file}
+						<div class="file-card">
+							<div class="file-icon">
+								<Icon name="file" size={24} />
+							</div>
+							<div class="file-info">
+								<span class="file-name">{file.filename}</span>
+								<span class="file-meta">{file.product}</span>
+							</div>
+						</div>
+					{/each}
+				</div>
+			</div>
+		{/if}
+	{/if}
 </div>
 
 <AddStorageModal
-  open={showAddStorageModal}
-  onClose={() => (showAddStorageModal = false)}
-  onPurchase={handlePurchaseAddon}
-  currentStorageGb={quota?.total_gb ?? 0}
+	open={showAddStorageModal}
+	onClose={() => (showAddStorageModal = false)}
+	onPurchase={handlePurchaseAddon}
+	currentStorageGb={quota?.total_gb ?? 0}
 />
 
 <style>
-  .dashboard {
-    max-width: 1400px;
-    margin: 0 auto;
-    padding: 2rem;
-  }
+	.dashboard {
+		padding: var(--space-6);
+		max-width: 1200px;
+	}
 
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 2rem;
-    flex-wrap: wrap;
-    gap: 1rem;
-  }
+	.page-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+		margin-bottom: var(--space-6);
+		flex-wrap: wrap;
+		gap: var(--space-4);
+	}
 
-  .header-actions {
-    display: flex;
-    gap: 0.75rem;
-  }
+	.page-header h1 {
+		font-size: var(--text-2xl);
+		font-weight: var(--font-semibold);
+		color: var(--color-text-primary);
+	}
 
-  .error-banner {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 1rem;
-    background: #fef2f2;
-    border: 1px solid #fecaca;
-    border-radius: 0.5rem;
-    margin-bottom: 1.5rem;
-    color: #dc2626;
-  }
+	.subtitle {
+		color: var(--color-text-secondary);
+		font-size: var(--text-sm);
+		margin-top: var(--space-1);
+	}
 
-  .error-banner button {
-    background: none;
-    border: none;
-    font-size: 1.25rem;
-    cursor: pointer;
-    color: #dc2626;
-  }
+	.header-actions {
+		display: flex;
+		gap: var(--space-3);
+	}
 
-  .loading {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 4rem;
-    gap: 1rem;
-  }
+	.btn {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		padding: var(--space-2) var(--space-4);
+		border-radius: var(--radius-lg);
+		font-weight: var(--font-medium);
+		font-size: var(--text-sm);
+		transition: all var(--transition-fast);
+	}
 
-  .spinner {
-    width: 2rem;
-    height: 2rem;
-    border: 3px solid #e5e7eb;
-    border-top-color: #3b82f6;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-  }
+	.btn-primary {
+		background: var(--color-primary);
+		color: var(--color-text-inverse);
+	}
 
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+	.btn-primary:hover {
+		background: var(--color-primary-hover);
+	}
 
-  .overview {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 1.5rem;
-    margin-bottom: 2rem;
-  }
+	.btn-secondary {
+		background: var(--color-surface);
+		color: var(--color-text-secondary);
+		border: 1px solid var(--color-border);
+	}
 
-  @media (max-width: 768px) {
-    .overview {
-      grid-template-columns: 1fr;
-    }
-  }
+	.btn-secondary:hover {
+		background: var(--color-surface-hover);
+		color: var(--color-text-primary);
+	}
 
-  .tabs {
-    display: flex;
-    gap: 0.5rem;
-    margin-bottom: 1.5rem;
-    border-bottom: 1px solid #e5e7eb;
-  }
+	.error-banner {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: var(--space-3) var(--space-4);
+		background: var(--color-error-muted);
+		border: 1px solid var(--color-error);
+		border-radius: var(--radius-lg);
+		margin-bottom: var(--space-4);
+		color: var(--color-error);
+	}
 
-  .tab {
-    padding: 0.75rem 1.5rem;
-    background: none;
-    border: none;
-    cursor: pointer;
-    font-weight: 500;
-    color: #6b7280;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-    transition: all 0.2s;
-  }
+	.error-banner button {
+		color: var(--color-error);
+		padding: var(--space-1);
+		border-radius: var(--radius-md);
+	}
 
-  .tab:hover {
-    color: #374151;
-  }
+	.error-banner button:hover {
+		background: rgba(248, 113, 113, 0.2);
+	}
 
-  .tab.active {
-    color: #3b82f6;
-    border-bottom-color: #3b82f6;
-  }
+	.loading {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		padding: var(--space-16);
+		gap: var(--space-4);
+		color: var(--color-text-secondary);
+	}
 
-  .toolbar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-    flex-wrap: wrap;
-  }
+	.spinner {
+		width: 2rem;
+		height: 2rem;
+		border: 3px solid var(--color-border);
+		border-top-color: var(--color-primary);
+		border-radius: 50%;
+		animation: spin 1s linear infinite;
+	}
 
-  .toolbar-left,
-  .toolbar-right {
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
-  }
+	@keyframes spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
 
-  .search-input {
-    padding: 0.5rem 1rem;
-    border: 1px solid #e5e7eb;
-    border-radius: 0.5rem;
-    width: 250px;
-  }
+	/* Overview Grid */
+	.overview-grid {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: var(--space-4);
+		margin-bottom: var(--space-6);
+	}
 
-  .filter-select {
-    padding: 0.5rem 1rem;
-    border: 1px solid #e5e7eb;
-    border-radius: 0.5rem;
-    background: white;
-  }
+	@media (max-width: 900px) {
+		.overview-grid {
+			grid-template-columns: 1fr;
+		}
+	}
 
-  .view-btn {
-    padding: 0.5rem 0.75rem;
-    border: 1px solid #e5e7eb;
-    background: white;
-    cursor: pointer;
-    border-radius: 0.5rem;
-    font-size: 1rem;
-  }
+	.card {
+		background: var(--color-bg-elevated);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-xl);
+		padding: var(--space-4);
+	}
 
-  .view-btn.active {
-    background: #3b82f6;
-    color: white;
-    border-color: #3b82f6;
-  }
+	/* Stats Grid */
+	.stats-grid {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: var(--space-4);
+		margin-bottom: var(--space-6);
+	}
 
-  .btn {
-    padding: 0.5rem 1rem;
-    border-radius: 0.5rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
+	@media (max-width: 768px) {
+		.stats-grid {
+			grid-template-columns: 1fr;
+		}
+	}
 
-  .btn-primary {
-    background: #3b82f6;
-    color: white;
-    border: none;
-  }
+	.stat-card {
+		display: flex;
+		align-items: center;
+		gap: var(--space-4);
+		background: var(--color-bg-elevated);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-xl);
+		padding: var(--space-4);
+		transition: all var(--transition-fast);
+	}
 
-  .btn-primary:hover {
-    background: #2563eb;
-  }
+	.stat-card:hover {
+		border-color: var(--color-primary);
+		background: var(--color-surface-hover);
+	}
 
-  .btn-secondary {
-    background: #f3f4f6;
-    color: #374151;
-    border: 1px solid #e5e7eb;
-  }
+	.stat-icon {
+		width: 48px;
+		height: 48px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--color-primary-muted);
+		color: var(--color-primary);
+		border-radius: var(--radius-lg);
+	}
 
-  .btn-secondary:hover {
-    background: #e5e7eb;
-  }
+	.stat-icon.trash {
+		background: var(--color-error-muted);
+		color: var(--color-error);
+	}
+
+	.stat-icon.storage {
+		background: var(--color-info-muted);
+		color: var(--color-info);
+	}
+
+	.stat-content {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.stat-value {
+		font-size: var(--text-xl);
+		font-weight: var(--font-semibold);
+		color: var(--color-text-primary);
+	}
+
+	.stat-label {
+		font-size: var(--text-sm);
+		color: var(--color-text-secondary);
+	}
+
+	/* Sections */
+	.section {
+		margin-bottom: var(--space-6);
+	}
+
+	.section-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: var(--space-4);
+	}
+
+	.section-header h2 {
+		font-size: var(--text-lg);
+		font-weight: var(--font-semibold);
+		color: var(--color-text-primary);
+	}
+
+	.view-all {
+		display: flex;
+		align-items: center;
+		gap: var(--space-1);
+		color: var(--color-primary);
+		font-size: var(--text-sm);
+		font-weight: var(--font-medium);
+		transition: color var(--transition-fast);
+	}
+
+	.view-all:hover {
+		color: var(--color-primary-hover);
+	}
+
+	/* Recent Files Grid */
+	.recent-files-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+		gap: var(--space-3);
+	}
+
+	.file-card {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		background: var(--color-bg-elevated);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-lg);
+		padding: var(--space-3);
+		transition: all var(--transition-fast);
+	}
+
+	.file-card:hover {
+		border-color: var(--color-border-strong);
+		background: var(--color-surface-hover);
+	}
+
+	.file-icon {
+		width: 40px;
+		height: 40px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--color-surface);
+		color: var(--color-text-secondary);
+		border-radius: var(--radius-md);
+	}
+
+	.file-info {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.file-name {
+		font-size: var(--text-sm);
+		font-weight: var(--font-medium);
+		color: var(--color-text-primary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.file-meta {
+		font-size: var(--text-xs);
+		color: var(--color-text-tertiary);
+		text-transform: capitalize;
+	}
 </style>

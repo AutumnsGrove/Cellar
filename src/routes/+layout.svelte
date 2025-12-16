@@ -1,46 +1,19 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+	import '$lib/styles/theme.css';
+	import type { Snippet } from 'svelte';
 
-  interface Props {
-    children: Snippet;
-  }
-
-  let { children }: Props = $props();
+	let { children }: { children: Snippet } = $props();
 </script>
 
 <svelte:head>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Amber - Storage Management</title>
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<link rel="preconnect" href="https://fonts.googleapis.com" />
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+	<link
+		href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+		rel="stylesheet"
+	/>
 </svelte:head>
 
-<div class="app">
-  {@render children()}
-</div>
-
-<style>
-  :global(*) {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-  }
-
-  :global(body) {
-    font-family:
-      -apple-system,
-      BlinkMacSystemFont,
-      'Segoe UI',
-      Roboto,
-      Oxygen,
-      Ubuntu,
-      Cantarell,
-      'Open Sans',
-      'Helvetica Neue',
-      sans-serif;
-    background: #f9fafb;
-    color: #1f2937;
-    line-height: 1.5;
-  }
-
-  .app {
-    min-height: 100vh;
-  }
-</style>
+{@render children()}

@@ -96,13 +96,13 @@
   }
 
   .modal {
-    background: white;
+    background: var(--color-bg-elevated);
     border-radius: 1rem;
     max-width: 600px;
     width: 100%;
     max-height: 90vh;
     overflow-y: auto;
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+    box-shadow: var(--shadow-xl);
   }
 
   .modal-header {
@@ -110,7 +110,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 1.5rem;
-    border-bottom: 1px solid #e5e7eb;
+    border-bottom: 1px solid var(--color-border-subtle);
   }
 
   .close-btn {
@@ -118,13 +118,13 @@
     border: none;
     font-size: 1.5rem;
     cursor: pointer;
-    color: #6b7280;
+    color: var(--color-text-secondary);
     padding: 0.25rem;
     line-height: 1;
   }
 
   .close-btn:hover {
-    color: #374151;
+    color: var(--color-text-primary);
   }
 
   .modal-body {
@@ -136,7 +136,7 @@
     justify-content: flex-end;
     gap: 0.75rem;
     padding: 1.5rem;
-    border-top: 1px solid #e5e7eb;
+    border-top: 1px solid var(--color-border-subtle);
   }
 
   .addons-grid {
@@ -148,25 +148,25 @@
   .addon-card {
     position: relative;
     padding: 1.5rem 1rem;
-    border: 2px solid #e5e7eb;
+    border: 2px solid var(--color-border);
     border-radius: 0.75rem;
-    background: white;
+    background: var(--color-bg-primary);
     cursor: pointer;
-    transition: all 0.2s;
+    transition: all var(--transition-fast);
     text-align: center;
   }
 
   .addon-card:hover {
-    border-color: #3b82f6;
+    border-color: var(--color-primary);
   }
 
   .addon-card.selected {
-    border-color: #3b82f6;
-    background: #eff6ff;
+    border-color: var(--color-primary);
+    background: var(--color-primary-muted);
   }
 
   .addon-card.popular {
-    border-color: #8b5cf6;
+    border-color: var(--color-primary);
   }
 
   .popular-badge {
@@ -174,8 +174,8 @@
     top: -0.75rem;
     left: 50%;
     transform: translateX(-50%);
-    background: #8b5cf6;
-    color: white;
+    background: var(--color-primary);
+    color: var(--color-text-inverse);
     font-size: 0.75rem;
     padding: 0.25rem 0.75rem;
     border-radius: 9999px;
@@ -184,25 +184,25 @@
   .addon-size {
     font-size: 1.5rem;
     font-weight: 700;
-    color: #1f2937;
+    color: var(--color-text-primary);
   }
 
   .addon-price {
     font-size: 1.125rem;
     font-weight: 600;
-    color: #3b82f6;
+    color: var(--color-primary);
     margin-top: 0.25rem;
   }
 
   .addon-desc {
     font-size: 0.75rem;
-    color: #6b7280;
+    color: var(--color-text-secondary);
     margin-top: 0.5rem;
   }
 
   .addon-total {
     font-size: 0.75rem;
-    color: #059669;
+    color: var(--color-success);
     margin-top: 0.75rem;
     font-weight: 500;
   }
@@ -212,27 +212,27 @@
     border-radius: 0.5rem;
     font-weight: 500;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: all var(--transition-fast);
   }
 
   .btn-primary {
-    background: #3b82f6;
-    color: white;
+    background: var(--color-primary);
+    color: var(--color-text-inverse);
     border: none;
   }
 
   .btn-primary:hover:not(:disabled) {
-    background: #2563eb;
+    background: var(--color-primary-hover);
   }
 
   .btn-secondary {
-    background: #f3f4f6;
-    color: #374151;
-    border: 1px solid #e5e7eb;
+    background: var(--color-bg-secondary);
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-border-subtle);
   }
 
   .btn-secondary:hover {
-    background: #e5e7eb;
+    background: var(--color-bg-tertiary);
   }
 
   .btn:disabled {
