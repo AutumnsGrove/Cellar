@@ -9,7 +9,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "amber"
-database_id = "6c0ea1d4-7194-4de2-835a-4bc696bd1778"
+database_id = "f688021b-a986-495a-94bb-352354768a22"
 
 # R2 Bucket
 [[r2_buckets]]
