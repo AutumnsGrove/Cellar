@@ -6,11 +6,20 @@
 import type { StorageFile, QuotaStatus, UsageBreakdown, StorageExport } from '$types';
 import { browser } from '$app/environment';
 
-const API_BASE = '/api/storage';
+// Worker API endpoint
+const WORKER_API_BASE = 'https://amber-api.grove.place/api/storage';
 
-// Use mock data until the worker API is deployed
-// TODO: Set to false once worker is live at amber-api.grove.place
-const USE_MOCK_DATA = true;
+// Use mock data in development, real API in production
+// Set to true to force mock data for testing
+const USE_MOCK_DATA = browser && import.meta.env.DEV;
+
+// Get auth token from wherever it's stored (cookie, localStorage, etc.)
+function getAuthToken(): string | null {
+  if (!browser) return null;
+  // TODO: Integrate with actual auth flow
+  // For now, check for token in localStorage or cookie
+  return localStorage.getItem('grove_access_token');
+}
 
 interface ApiResponse<T> {
   data?: T;
@@ -22,12 +31,20 @@ async function request<T>(
   options?: RequestInit
 ): Promise<ApiResponse<T>> {
   try {
-    const response = await fetch(`${API_BASE}${path}`, {
+    const token = getAuthToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...options?.headers as Record<string, string>
+    };
+
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    const response = await fetch(`${WORKER_API_BASE}${path}`, {
       ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...options?.headers
-      }
+      headers,
+      credentials: 'include'
     });
 
     const data = await response.json();
@@ -312,5 +329,5 @@ export async function cancelAddon(
 // ============== Download ==============
 
 export function getDownloadUrl(r2Key: string): string {
-  return `${API_BASE}/download/${encodeURIComponent(r2Key)}`;
+  return `${WORKER_API_BASE}/download/${encodeURIComponent(r2Key)}`;
 }
