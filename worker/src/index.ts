@@ -2,7 +2,7 @@
  * Amber Cloudflare Worker
  * API endpoints for storage management
  *
- * Uses @autumnsgrove/groveengine for database utilities
+ * Uses @autumnsgrove/groveengine for database and auth utilities
  */
 
 import {
@@ -14,12 +14,33 @@ import {
   count
 } from '@autumnsgrove/groveengine/services';
 import { formatBytes } from '@autumnsgrove/groveengine/utils';
+import {
+  createGroveAuthClient,
+  type GroveAuthClient,
+  type SubscriptionTier
+} from '@autumnsgrove/groveengine/groveauth';
 
 export interface Env {
   DB: D1Database;
   R2_BUCKET: R2Bucket;
-  HEARTWOOD_API_KEY?: string;
+  // GroveAuth (Heartwood) credentials
+  GROVEAUTH_CLIENT_ID: string;
+  GROVEAUTH_CLIENT_SECRET: string;
+  GROVEAUTH_AUTH_BASE_URL?: string;
+  // CORS
+  ALLOWED_ORIGINS?: string;
+  // Stripe (deferred)
   STRIPE_SECRET_KEY?: string;
+}
+
+// Auth client singleton (created per request since env varies)
+function createAuthClient(env: Env): GroveAuthClient {
+  return createGroveAuthClient({
+    clientId: env.GROVEAUTH_CLIENT_ID || 'amber',
+    clientSecret: env.GROVEAUTH_CLIENT_SECRET || '',
+    redirectUri: 'https://amber.grove.place/auth/callback',
+    authBaseUrl: env.GROVEAUTH_AUTH_BASE_URL || 'https://auth-api.grove.place'
+  });
 }
 
 // Types
@@ -66,25 +87,48 @@ const CRON_CONFIG = {
   }
 };
 
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization'
-};
+// CORS helper - validates origin against allowed list
+function getCorsHeaders(request: Request, env: Env): Record<string, string> {
+  const origin = request.headers.get('Origin') || '';
+  const allowedOrigins = (env.ALLOWED_ORIGINS || 'https://amber.grove.place').split(',');
 
-// Helpers
-function json(data: unknown, status = 200): Response {
+  // Check if origin is in the allowed list
+  const isAllowed = allowedOrigins.some(allowed =>
+    allowed.trim() === origin || allowed.trim() === '*'
+  );
+
+  return {
+    'Access-Control-Allow-Origin': isAllowed ? origin : allowedOrigins[0],
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Credentials': 'true'
+  };
+}
+
+// Response helpers - accept CORS headers for proper origin handling
+function jsonResponse(data: unknown, corsHeaders: Record<string, string>, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       'Content-Type': 'application/json',
-      ...CORS_HEADERS
+      ...corsHeaders
     }
   });
 }
 
+function errorResponse(message: string, corsHeaders: Record<string, string>, status = 400): Response {
+  return jsonResponse({ error: message }, corsHeaders, status);
+}
+
+// Legacy helpers for routes (will be passed corsHeaders via closure)
+let currentCorsHeaders: Record<string, string> = {};
+
+function json(data: unknown, status = 200): Response {
+  return jsonResponse(data, currentCorsHeaders, status);
+}
+
 function error(message: string, status = 400): Response {
-  return json({ error: message }, status);
+  return errorResponse(message, currentCorsHeaders, status);
 }
 
 function logCronEvent(entry: CronLogEntry): void {
@@ -131,9 +175,13 @@ async function handleRequest(
   const path = url.pathname;
   const method = request.method;
 
+  // Set CORS headers for this request
+  const corsHeaders = getCorsHeaders(request, env);
+  currentCorsHeaders = corsHeaders;
+
   // Handle CORS preflight
   if (method === 'OPTIONS') {
-    return new Response(null, { headers: CORS_HEADERS });
+    return new Response(null, { headers: corsHeaders });
   }
 
   // Find matching route
@@ -154,27 +202,38 @@ async function handleRequest(
   return error('Not found', 404);
 }
 
-// Auth middleware (stub - integrate with Heartwood)
+// Auth middleware - validates token with Heartwood/GroveAuth
 async function getAuthUser(
   request: Request,
   env: Env
-): Promise<{ id: string; tier: string } | null> {
+): Promise<{ id: string; tier: SubscriptionTier } | null> {
   const authHeader = request.headers.get('Authorization');
   if (!authHeader?.startsWith('Bearer ')) {
     return null;
   }
 
-  // TODO: Validate token with Heartwood
-  // For now, extract user from token (mock)
   const token = authHeader.slice(7);
 
-  // In production, validate with Heartwood API
-  // const response = await fetch('https://heartwood.grove.place/api/validate', {
-  //   headers: { 'Authorization': `Bearer ${token}` }
-  // });
+  try {
+    const authClient = createAuthClient(env);
 
-  // Mock user for development
-  return { id: 'user_123', tier: 'oak' };
+    // Verify the token with GroveAuth
+    const tokenInfo = await authClient.verifyToken(token);
+    if (!tokenInfo || !tokenInfo.active || !tokenInfo.sub) {
+      return null;
+    }
+
+    // Get user's subscription to determine their tier
+    const subscription = await authClient.getUserSubscription(token, tokenInfo.sub);
+
+    return {
+      id: tokenInfo.sub,
+      tier: subscription.subscription.tier
+    };
+  } catch (err) {
+    console.error('Auth validation error:', err);
+    return null;
+  }
 }
 
 // Storage helpers
