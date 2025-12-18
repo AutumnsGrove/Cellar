@@ -2,30 +2,13 @@
  * Amber Cloudflare Worker
  * API endpoints for storage management
  *
- * Uses @autumnsgrove/groveengine for database and auth utilities
+ * Uses direct API calls for auth validation
  */
-
-import {
-  generateId,
-  now,
-  queryOne,
-  queryMany,
-  execute,
-  count
-} from '@autumnsgrove/groveengine/services';
-import { formatBytes } from '@autumnsgrove/groveengine/utils';
-import {
-  createGroveAuthClient,
-  type GroveAuthClient,
-  type SubscriptionTier
-} from '@autumnsgrove/groveengine/groveauth';
 
 export interface Env {
   DB: D1Database;
   R2_BUCKET: R2Bucket;
   // GroveAuth (Heartwood) credentials
-  GROVEAUTH_CLIENT_ID: string;
-  GROVEAUTH_CLIENT_SECRET: string;
   GROVEAUTH_AUTH_BASE_URL?: string;
   // CORS
   ALLOWED_ORIGINS?: string;
@@ -33,14 +16,51 @@ export interface Env {
   STRIPE_SECRET_KEY?: string;
 }
 
-// Auth client singleton (created per request since env varies)
-function createAuthClient(env: Env): GroveAuthClient {
-  return createGroveAuthClient({
-    clientId: env.GROVEAUTH_CLIENT_ID || 'amber',
-    clientSecret: env.GROVEAUTH_CLIENT_SECRET || '',
-    redirectUri: 'https://amber.grove.place/auth/callback',
-    authBaseUrl: env.GROVEAUTH_AUTH_BASE_URL || 'https://auth-api.grove.place'
-  });
+// Subscription tier type
+type SubscriptionTier = 'seedling' | 'sapling' | 'oak' | 'evergreen';
+
+// Token verification response from GroveAuth
+interface TokenInfo {
+  active: boolean;
+  sub?: string;
+  email?: string;
+  name?: string;
+}
+
+// Subscription response from GroveAuth
+interface SubscriptionResponse {
+  subscription: {
+    tier: SubscriptionTier;
+  };
+}
+
+// Simple ID generator
+function generateId(): string {
+  return crypto.randomUUID();
+}
+
+// Current timestamp in ISO format
+function now(): string {
+  return new Date().toISOString();
+}
+
+// Database query helpers
+async function queryOne<T>(db: D1Database, sql: string, params: unknown[] = []): Promise<T | null> {
+  const stmt = db.prepare(sql);
+  const result = await stmt.bind(...params).first<T>();
+  return result ?? null;
+}
+
+async function queryMany<T>(db: D1Database, sql: string, params: unknown[] = []): Promise<T[]> {
+  const stmt = db.prepare(sql);
+  const result = await stmt.bind(...params).all<T>();
+  return result.results ?? [];
+}
+
+async function execute(db: D1Database, sql: string, params: unknown[] = []): Promise<{ success: boolean }> {
+  const stmt = db.prepare(sql);
+  await stmt.bind(...params).run();
+  return { success: true };
 }
 
 // Types
@@ -213,18 +233,34 @@ async function getAuthUser(
   }
 
   const token = authHeader.slice(7);
+  const authBaseUrl = env.GROVEAUTH_AUTH_BASE_URL || 'https://auth-api.grove.place';
 
   try {
-    const authClient = createAuthClient(env);
-
     // Verify the token with GroveAuth
-    const tokenInfo = await authClient.verifyToken(token);
-    if (!tokenInfo || !tokenInfo.active || !tokenInfo.sub) {
+    const verifyResponse = await fetch(`${authBaseUrl}/verify`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+
+    if (!verifyResponse.ok) {
+      return null;
+    }
+
+    const tokenInfo: TokenInfo = await verifyResponse.json();
+    if (!tokenInfo.active || !tokenInfo.sub) {
       return null;
     }
 
     // Get user's subscription to determine their tier
-    const subscription = await authClient.getUserSubscription(token, tokenInfo.sub);
+    const subResponse = await fetch(`${authBaseUrl}/users/${tokenInfo.sub}/subscription`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+
+    if (!subResponse.ok) {
+      // Default to seedling if subscription check fails
+      return { id: tokenInfo.sub, tier: 'seedling' };
+    }
+
+    const subscription: SubscriptionResponse = await subResponse.json();
 
     return {
       id: tokenInfo.sub,

@@ -36,6 +36,19 @@ routes = [
   { pattern = "amber-api.grove.place/*", zone_name = "grove.place" }
 ]
 
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "amber"
+database_id = "f688021b-a986-495a-94bb-352354768a22"
+
+[[env.production.r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "grove-storage"
+
+[env.production.vars]
+GROVEAUTH_AUTH_BASE_URL = "https://auth-api.grove.place"
+ALLOWED_ORIGINS = "https://amber.grove.place"
+
 [env.staging]
 name = "amber-worker-staging"
 [env.staging.vars]
