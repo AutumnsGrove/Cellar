@@ -5,7 +5,8 @@
  * Uses GroveAuth client for authentication
  */
 
-import { createGroveAuthClient } from '@autumnsgrove/groveengine/dist/groveauth/client.js';
+// Import directly from groveauth dist files (avoids Svelte bundling issues)
+import { createGroveAuthClient } from '../../node_modules/@autumnsgrove/groveengine/dist/groveauth/client.js';
 
 export interface Env {
   DB: D1Database;
