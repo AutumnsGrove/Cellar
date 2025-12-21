@@ -637,7 +637,7 @@ route(
 );
 
 // POST /api/storage/export - Start export job
-route('POST', '/api/storage/export', async (request, env) => {
+route('POST', '/api/storage/export', async (request, env, ctx) => {
   const user = await getAuthUser(request, env);
   if (!user) return error('Unauthorized', 401);
 
@@ -678,11 +678,15 @@ route('POST', '/api/storage/export', async (request, env) => {
     .run();
 
   // Trigger export processing via Durable Object
+  console.log('[Export] Triggering Durable Object for export:', exportId);
   const doId = env.EXPORT_JOBS.idFromName(exportId);
   const doStub = env.EXPORT_JOBS.get(doId);
+  console.log('[Export] DO stub created, calling fetch()');
 
   // Start export in background (non-blocking)
-  ctx.waitUntil(doStub.startExport(exportId));
+  const doRequest = new Request(`https://fake-host/?action=start&exportId=${exportId}`);
+  ctx.waitUntil(doStub.fetch(doRequest));
+  console.log('[Export] DO fetch() queued via ctx.waitUntil()');
 
   return json({
     export_id: exportId,

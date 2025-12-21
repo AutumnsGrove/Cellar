@@ -183,33 +183,88 @@ The following is implemented and ready:
 
 ## Next Steps
 
-### Immediate (Debug Export System)
-- [ ] Debug 500 error in POST /api/storage/export endpoint
-  - Check Cloudflare Logs for stack trace
-  - Likely issue with getGroveAuthClient or D1 query
-  - Test with wrangler tail for live logs
-- [ ] Upload more test files to R2 for comprehensive testing
-- [ ] Test full export flow end-to-end
-- [ ] Test category-specific exports (blog, ivy)
-- [ ] Verify chunk processing with 100+ files
+### IMMEDIATE - Export System Debugging (Dec 21, 2024)
 
-### Testing Commands
+**Status:** Export system partially working, but stuck in "processing" state during finalization.
+
+**What Works:**
+- ✅ Export job creation (POST /api/storage/export)
+- ✅ Durable Object trigger via fetch()
+- ✅ DO alarm() method fires
+- ✅ Status updates to "processing"
+- ✅ Test mode auth (X-Test-User-ID header)
+
+**What's Broken:**
+- ❌ Exports get stuck in "processing" for 20+ seconds
+- ❌ No error logged to D1 (handleFailure not being called)
+- ❌ wrangler tail logs incomplete/inconsistent
+
+**Bugs Fixed Today:**
+1. ✅ Fixed `ctx is not defined` - Added ctx param to route handler (index.ts:640)
+2. ✅ Fixed DO method calling - Added fetch() handler to ExportJob
+3. ✅ Fixed storage API - Changed `this.state.storage` → `this.ctx.storage`
+4. ✅ Fixed R2 upload attempt - Buffered zip in memory before upload
+
+**Next Session TODO:**
+1. **Add comprehensive error handling** (30 min)
+   - Wrap processChunk() in try/catch with D1 error logging
+   - Wrap finalizeExport() in try/catch with D1 error logging
+   - Add timestamp to every console.log
+   - Log start/end of every major function
+
+2. **Test with Cloudflare Dashboard** (15 min)
+   - Create export: `curl -X POST https://amber-worker.m7jv4v7npb.workers.dev/api/storage/export -H "X-Test-User-ID: test-user-123" -H "Content-Type: application/json" -d '{"type":"full"}'`
+   - **IMMEDIATELY** open Cloudflare Dashboard → Workers & Pages → amber-worker → Logs
+   - Watch real-time logs (better than wrangler tail)
+   - Check Durable Objects section for ExportJob instance logs
+   - Wait 30 seconds, check D1 for status/error
+
+3. **If still failing: Simplify** (1 hour)
+   - Skip ZIP generation entirely
+   - Just test: processChunk() → collect file metadata → update D1 with file_count
+   - Once that works, add back ZIP generation
+   - Use simpler R2 upload (single small file test first)
+
+**Testing Commands:**
 ```bash
-# Watch worker logs
+# Start wrangler tail (backup to dashboard)
 npx wrangler tail
 
-# Test export creation
+# Create export
 curl -X POST https://amber-worker.m7jv4v7npb.workers.dev/api/storage/export \
   -H "X-Test-User-ID: test-user-123" \
   -H "Content-Type: application/json" \
   -d '{"type":"full"}'
 
-# Check D1 database
-npx wrangler d1 execute amber --remote --command "SELECT * FROM storage_exports"
+# Check export status
+npx wrangler d1 execute amber --remote --command \
+  "SELECT id, status, file_count, error_message FROM storage_exports ORDER BY created_at DESC LIMIT 1"
 
-# List R2 files
-npx wrangler r2 object list grove-storage --prefix=test-user-123/
+# Check if files exist in D1
+npx wrangler d1 execute amber --remote --command \
+  "SELECT COUNT(*) as count FROM storage_files WHERE user_id = 'test-user-123'"
 ```
+
+**Cloudflare Dashboard Access:**
+1. Go to: https://dash.cloudflare.com/
+2. Select account → Workers & Pages
+3. Click "amber-worker"
+4. Click "Logs" tab (real-time logs, better than wrangler tail)
+5. Click "Durable Objects" tab → find ExportJob instance for detailed DO logs
+
+**Test Data:**
+- User: test-user-123
+- Files in D1: 20 files
+- Files in R2: ~6 files uploaded manually (rest missing, should be handled gracefully)
+
+---
+
+### Future Testing (After Export Works)
+- [ ] Upload more test files to R2 for comprehensive testing
+- [ ] Test category-specific exports (blog, ivy)
+- [ ] Verify chunk processing with 100+ files
+- [ ] Test export download endpoint
+- [ ] Test export expiration (7 days)
 
 ---
 

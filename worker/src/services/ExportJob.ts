@@ -52,9 +52,30 @@ interface FileRecord {
  */
 export class ExportJob extends DurableObject<Env> {
   /**
+   * Handle HTTP requests to the Durable Object
+   */
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const action = url.searchParams.get('action');
+    const exportId = url.searchParams.get('exportId');
+
+    console.log('[ExportJob] fetch() called with action:', action, 'exportId:', exportId);
+
+    if (action === 'start' && exportId) {
+      await this.startExport(exportId);
+      return new Response(JSON.stringify({ success: true }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    return new Response('Invalid action', { status: 400 });
+  }
+
+  /**
    * Start an export job by fetching metadata and scheduling processing
    */
   async startExport(exportId: string): Promise<void> {
+    console.log('[ExportJob] startExport() called for export:', exportId);
     // Fetch export from D1 to get user_id, export_type, filter_params
     const result = await this.env.DB.prepare(
       'SELECT id, user_id, export_type, filter_params FROM storage_exports WHERE id = ?'
@@ -86,9 +107,10 @@ export class ExportJob extends DurableObject<Env> {
     };
 
     // Store state in Durable Object storage
-    await this.state.storage.put('export_state', JSON.stringify(state));
+    await this.ctx.storage.put('export_state', JSON.stringify(state));
 
     // Update D1 to mark as processing
+    console.log('[ExportJob] Updating status to processing');
     await this.env.DB.prepare(
       "UPDATE storage_exports SET status = 'processing' WHERE id = ?"
     )
@@ -96,41 +118,45 @@ export class ExportJob extends DurableObject<Env> {
       .run();
 
     // Schedule first alarm to start processing
-    await this.state.storage.setAlarm(Date.now() + 1000); // Start in 1 second
+    console.log('[ExportJob] Scheduling alarm in 1 second');
+    await this.ctx.storage.setAlarm(Date.now() + 1000); // Start in 1 second
+    console.log('[ExportJob] startExport() completed successfully');
   }
 
   /**
    * Alarm handler - processes chunks and schedules next iteration
    */
   async alarm(): Promise<void> {
-    const stateJson = await this.state.storage.get<string>('export_state');
+    console.log('[ExportJob] alarm() triggered');
+    const stateJson = await this.ctx.storage.get<string>('export_state');
     if (!stateJson) {
-      console.error('Export state not found in Durable Object storage');
+      console.error('[ExportJob] Export state not found in Durable Object storage');
       return;
     }
 
     const state: ExportState = JSON.parse(stateJson);
+    console.log('[ExportJob] Processing chunk for export:', state.exportId, 'offset:', state.currentOffset);
 
     try {
       // Process next chunk of files
       const hasMoreChunks = await this.processChunk(state);
 
       // Update state
-      await this.state.storage.put('export_state', JSON.stringify(state));
+      await this.ctx.storage.put('export_state', JSON.stringify(state));
 
       if (hasMoreChunks) {
         // Schedule next chunk processing (delay to avoid rate limiting)
         const nextAlarmTime = Date.now() + 2000; // 2 second delay between chunks
-        await this.state.storage.setAlarm(nextAlarmTime);
+        await this.ctx.storage.setAlarm(nextAlarmTime);
       } else {
         // All chunks processed, finalize the export
         await this.finalizeExport(state);
         // Clean up state after finalization
-        await this.state.storage.delete('export_state');
+        await this.ctx.storage.delete('export_state');
       }
     } catch (error) {
       await this.handleFailure(state, error as Error);
-      await this.state.storage.delete('export_state');
+      await this.ctx.storage.delete('export_state');
     }
   }
 
@@ -214,6 +240,8 @@ export class ExportJob extends DurableObject<Env> {
    * Finalize export by streaming all files to ZIP and uploading to R2
    */
   async finalizeExport(state: ExportState): Promise<void> {
+    console.log('[ExportJob] Finalizing export, creating ZIP with', state.processedFiles.length, 'files');
+
     // Create readable/writable pair for the ZIP stream
     const { readable, writable } = new TransformStream<
       Uint8Array,
@@ -221,6 +249,23 @@ export class ExportJob extends DurableObject<Env> {
     >();
 
     const zipStreamer = new ZipStreamer(writable);
+
+    // Buffer chunks from the readable stream
+    const chunks: Uint8Array[] = [];
+    const reader = readable.getReader();
+
+    // Start reading chunks in background
+    const bufferPromise = (async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    })();
 
     // Add README
     await zipStreamer.addTextFile('README.txt', createReadme());
@@ -235,36 +280,41 @@ export class ExportJob extends DurableObject<Env> {
     }));
     await zipStreamer.addTextFile('manifest.json', createManifest(manifestEntries));
 
-    // Stream files into ZIP (start in background)
-    const streamingPromise = (async () => {
-      try {
-        for (const file of state.processedFiles) {
-          const object = await this.env.R2_BUCKET.get(file.r2_key);
-          if (!object?.body) {
-            console.warn(`Skipping file ${file.r2_key} - not found during finalization`);
-            continue;
-          }
-
-          await zipStreamer.addFile({
-            filename: `${file.product}/${file.category}/${file.filename}`,
-            data: object.body,
-            size: file.size_bytes,
-            mtime: new Date()
-          });
-        }
-
-        await zipStreamer.close();
-      } catch (error) {
-        console.error('Error streaming files to ZIP:', error);
-        await zipStreamer.close().catch(() => {
-          /* ignore */
-        });
-        throw error;
+    // Stream files into ZIP
+    for (const file of state.processedFiles) {
+      const object = await this.env.R2_BUCKET.get(file.r2_key);
+      if (!object?.body) {
+        console.warn(`Skipping file ${file.r2_key} - not found during finalization`);
+        continue;
       }
-    })();
 
-    // Upload to R2 while streaming
-    const uploadPromise = this.env.R2_BUCKET.put(state.r2Key, readable, {
+      await zipStreamer.addFile({
+        filename: `${file.product}/${file.category}/${file.filename}`,
+        data: object.body,
+        size: file.size_bytes,
+        mtime: new Date()
+      });
+    }
+
+    await zipStreamer.close();
+
+    // Wait for all chunks to be buffered
+    await bufferPromise;
+
+    // Combine chunks into single buffer
+    console.log('[ExportJob] Collected', chunks.length, 'chunks, combining...');
+    const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+    const zipBuffer = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      zipBuffer.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    console.log('[ExportJob] Uploading ZIP to R2, size:', zipBuffer.length, 'bytes');
+
+    // Upload to R2 with known length
+    await this.env.R2_BUCKET.put(state.r2Key, zipBuffer, {
       customMetadata: {
         'export-id': state.exportId,
         'user-id': state.userId,
@@ -273,9 +323,6 @@ export class ExportJob extends DurableObject<Env> {
         'total-size': state.totalSize.toString()
       }
     });
-
-    // Wait for both streaming and upload to complete
-    await Promise.all([streamingPromise, uploadPromise]);
 
     // Update D1 to mark as completed
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // +7 days
