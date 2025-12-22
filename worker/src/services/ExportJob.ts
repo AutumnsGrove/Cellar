@@ -2,8 +2,12 @@
  * ExportJob Durable Object
  *
  * Handles background processing of file exports to ZIP archives.
- * Uses Durable Object alarms to process files in chunks, handling
- * large exports that exceed the request timeout limit.
+ * Uses SQLite storage for persistent state and alarm-based chunk processing.
+ *
+ * Architecture (inspired by Forage):
+ * - SQLite tables store job state, processed files, and missing files
+ * - Alarm API drives batch processing loop
+ * - State survives DO hibernation and restarts
  */
 
 import { DurableObject } from 'cloudflare:workers';
@@ -11,27 +15,9 @@ import { ZipStreamer, createManifest, createReadme, ZIP_CONFIG } from './zipStre
 import type { Env } from '../index';
 
 /**
- * State maintained across alarm invocations
+ * Export job status
  */
-interface ExportState {
-  exportId: string;
-  userId: string;
-  exportType: 'full' | 'blog' | 'ivy' | 'category';
-  filterParams: Record<string, string> | null;
-  currentOffset: number;
-  processedFiles: Array<{
-    id: string;
-    r2_key: string;
-    filename: string;
-    size_bytes: number;
-    product: string;
-    category: string;
-  }>;
-  totalSize: number;
-  missingFiles: string[];
-  r2Key: string;
-  createdAt: string;
-}
+type ExportStatus = 'pending' | 'running' | 'completed' | 'failed';
 
 /**
  * File record from D1 database
@@ -48,236 +34,532 @@ interface FileRecord {
 }
 
 /**
- * ExportJob Durable Object for processing large exports asynchronously
+ * Processed file record stored in DO SQLite
+ */
+interface ProcessedFile {
+  id: string;
+  r2_key: string;
+  filename: string;
+  size_bytes: number;
+  product: string;
+  category: string;
+}
+
+/**
+ * ExportJob Durable Object with SQLite storage for reliable state management
  */
 export class ExportJob extends DurableObject<Env> {
+  private sql!: SqlStorage;
+  private initialized = false;
+
+  /**
+   * Initialize SQLite schema if not already done
+   */
+  private ensureSchema(): void {
+    if (this.initialized) return;
+
+    // Access SQLite storage (enabled via new_sqlite_classes migration)
+    this.sql = this.ctx.storage.sql;
+
+    // Create tables for export state
+    this.sql.exec(`
+      -- Core export job tracking (single row per DO instance)
+      CREATE TABLE IF NOT EXISTS export_job (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        export_type TEXT NOT NULL,
+        filter_params TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        current_offset INTEGER DEFAULT 0,
+        total_size INTEGER DEFAULT 0,
+        file_count INTEGER DEFAULT 0,
+        r2_key TEXT,
+        error TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+
+      -- Processed files ready for zipping
+      CREATE TABLE IF NOT EXISTS export_files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id TEXT NOT NULL,
+        r2_key TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        product TEXT NOT NULL,
+        category TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+
+      -- Files that were missing in R2
+      CREATE TABLE IF NOT EXISTS export_missing (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        r2_key TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+
+      -- Index for faster queries
+      CREATE INDEX IF NOT EXISTS idx_export_files_r2_key ON export_files(r2_key);
+    `);
+
+    this.initialized = true;
+  }
+
   /**
    * Handle HTTP requests to the Durable Object
    */
   async fetch(request: Request): Promise<Response> {
+    this.ensureSchema();
+
     const url = new URL(request.url);
     const action = url.searchParams.get('action');
     const exportId = url.searchParams.get('exportId');
 
     console.log('[ExportJob] fetch() called with action:', action, 'exportId:', exportId);
 
-    if (action === 'process-sync' && exportId) {
-      // Process synchronously (no alarms, runs immediately)
-      try {
-        await this.processExportSync(exportId);
-        return new Response(JSON.stringify({ success: true, message: 'Export processed' }), {
-          headers: { 'Content-Type': 'application/json' }
-        });
-      } catch (error) {
-        console.error('[ExportJob] Sync processing error:', error);
-        return new Response(JSON.stringify({ success: false, error: String(error) }), {
-          status: 500,
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-    }
-
-    if (action === 'start' && exportId) {
-      // Schedule alarm-based processing (DO runs independently of Worker request)
-      await this.startExport(exportId);
-      return new Response(JSON.stringify({ success: true, message: 'Export scheduled' }), {
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
-    if (action === 'reset') {
-      await this.ctx.storage.deleteAll();
-      console.log('[ExportJob] DO state cleared via reset action');
-      return new Response(JSON.stringify({ success: true, message: 'DO state cleared' }), {
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
-    return new Response('Invalid action', { status: 400 });
-  }
-
-  /**
-   * Process an export synchronously (bypasses unreliable alarm system)
-   */
-  async processExportSync(exportId: string): Promise<void> {
-    console.log('[ExportJob] processExportSync() called for export:', exportId);
-
-    // Fetch export from D1
-    const result = await this.env.DB.prepare(
-      'SELECT id, user_id, export_type, filter_params FROM storage_exports WHERE id = ?'
-    )
-      .bind(exportId)
-      .first<{
-        id: string;
-        user_id: string;
-        export_type: string;
-        filter_params: string | null;
-      }>();
-
-    if (!result) {
-      throw new Error(`Export ${exportId} not found`);
-    }
-
-    // Initialize state
-    const state: ExportState = {
-      exportId,
-      userId: result.user_id,
-      exportType: result.export_type as ExportState['exportType'],
-      filterParams: result.filter_params ? JSON.parse(result.filter_params) : null,
-      currentOffset: 0,
-      processedFiles: [],
-      totalSize: 0,
-      missingFiles: [],
-      r2Key: `exports/${result.user_id}/${exportId}/${Date.now()}-export.zip`,
-      createdAt: new Date().toISOString()
-    };
-
-    // Update D1 to mark as processing
-    console.log('[ExportJob] Updating status to processing');
-    await this.env.DB.prepare(
-      "UPDATE storage_exports SET status = 'processing' WHERE id = ?"
-    )
-      .bind(exportId)
-      .run();
-
     try {
-      // Process all chunks until done
-      console.log('[ExportJob] Processing chunks...');
-      let hasMoreChunks = true;
-      while (hasMoreChunks) {
-        hasMoreChunks = await this.processChunk(state);
-        console.log('[ExportJob] Chunk processed, hasMore:', hasMoreChunks, 'files:', state.processedFiles.length);
+      if (action === 'start' && exportId) {
+        return await this.handleStart(exportId);
       }
 
-      // Finalize the export
-      console.log('[ExportJob] Finalizing export...');
-      await this.finalizeExport(state);
-      console.log('[ExportJob] Export completed successfully');
+      if (action === 'status') {
+        return this.handleGetStatus();
+      }
+
+      if (action === 'reset') {
+        return await this.handleReset();
+      }
+
+      // Legacy sync processing - still supported as fallback
+      if (action === 'process-sync' && exportId) {
+        return await this.handleProcessSync(exportId);
+      }
+
+      return new Response(JSON.stringify({ error: 'Invalid action' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
     } catch (error) {
-      console.error('[ExportJob] Export failed:', error);
-      await this.handleFailure(state, error as Error);
-      throw error;
+      console.error('[ExportJob] Request error:', error);
+      return new Response(
+        JSON.stringify({ error: String(error) }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
     }
-  }
-
-  /**
-   * Start an export job by fetching metadata and scheduling processing
-   * @deprecated Use processExportSync instead - alarms are unreliable
-   */
-  async startExport(exportId: string): Promise<void> {
-    console.log('[ExportJob] startExport() called for export:', exportId);
-    // Fetch export from D1 to get user_id, export_type, filter_params
-    const result = await this.env.DB.prepare(
-      'SELECT id, user_id, export_type, filter_params FROM storage_exports WHERE id = ?'
-    )
-      .bind(exportId)
-      .first<{
-        id: string;
-        user_id: string;
-        export_type: string;
-        filter_params: string | null;
-      }>();
-
-    if (!result) {
-      throw new Error(`Export ${exportId} not found`);
-    }
-
-    // Initialize state
-    const state: ExportState = {
-      exportId,
-      userId: result.user_id,
-      exportType: result.export_type as ExportState['exportType'],
-      filterParams: result.filter_params ? JSON.parse(result.filter_params) : null,
-      currentOffset: 0,
-      processedFiles: [],
-      totalSize: 0,
-      missingFiles: [],
-      r2Key: `exports/${result.user_id}/${exportId}/${Date.now()}-export.zip`,
-      createdAt: new Date().toISOString()
-    };
-
-    // Store state in Durable Object storage
-    await this.ctx.storage.put('export_state', JSON.stringify(state));
-
-    // Update D1 to mark as processing
-    console.log('[ExportJob] Updating status to processing');
-    await this.env.DB.prepare(
-      "UPDATE storage_exports SET status = 'processing' WHERE id = ?"
-    )
-      .bind(exportId)
-      .run();
-
-    // Schedule first alarm to start processing
-    console.log('[ExportJob] Scheduling alarm in 1 second');
-    await this.ctx.storage.setAlarm(Date.now() + 1000); // Start in 1 second
-    console.log('[ExportJob] startExport() completed successfully');
   }
 
   /**
    * Alarm handler - processes chunks and schedules next iteration
    */
   async alarm(): Promise<void> {
-    console.log('[ExportJob] alarm() triggered at', new Date().toISOString());
-    const stateJson = await this.ctx.storage.get<string>('export_state');
-    if (!stateJson) {
-      console.error('[ExportJob] Export state not found in Durable Object storage');
+    this.ensureSchema();
+
+    const job = this.getJob();
+    if (!job) {
+      console.error('[ExportJob] Alarm fired but no job found');
       return;
     }
 
-    const state: ExportState = JSON.parse(stateJson);
-    console.log('[ExportJob] Processing chunk for export:', state.exportId, 'offset:', state.currentOffset, 'files so far:', state.processedFiles.length);
+    if (job.status !== 'running') {
+      console.log(`[ExportJob] Job status is ${job.status}, skipping alarm`);
+      return;
+    }
+
+    console.log('[ExportJob] Alarm processing chunk for export:', job.id, 'offset:', job.current_offset);
 
     try {
       // Process next chunk of files
-      console.log('[ExportJob] Calling processChunk...');
-      const hasMoreChunks = await this.processChunk(state);
-      console.log('[ExportJob] processChunk returned:', hasMoreChunks, 'processedFiles:', state.processedFiles.length);
-
-      // Update state
-      await this.ctx.storage.put('export_state', JSON.stringify(state));
+      const hasMoreChunks = await this.processChunk(job);
+      console.log('[ExportJob] Chunk processed, hasMore:', hasMoreChunks, 'files:', this.getProcessedFileCount());
 
       if (hasMoreChunks) {
-        // Schedule next chunk processing (delay to avoid rate limiting)
-        const nextAlarmTime = Date.now() + 2000; // 2 second delay between chunks
-        console.log('[ExportJob] Scheduling next alarm in 2 seconds');
-        await this.ctx.storage.setAlarm(nextAlarmTime);
+        // Schedule next chunk processing (2 second delay between chunks)
+        await this.scheduleAlarm(2000);
       } else {
         // All chunks processed, finalize the export
-        console.log('[ExportJob] No more chunks, calling finalizeExport...');
-        await this.finalizeExport(state);
-        console.log('[ExportJob] finalizeExport completed successfully');
-        // Clean up state after finalization
-        await this.ctx.storage.delete('export_state');
+        console.log('[ExportJob] No more chunks, finalizing export...');
+        await this.finalizeExport(job);
+        console.log('[ExportJob] Export finalized successfully');
       }
     } catch (error) {
-      console.error('[ExportJob] alarm() caught error:', error);
-      await this.handleFailure(state, error as Error);
-      await this.ctx.storage.delete('export_state');
+      console.error('[ExportJob] Alarm processing error:', error);
+      this.updateJobStatus('failed', String(error));
+      await this.updateD1Status(job.id, 'failed', String(error));
     }
   }
 
   /**
+   * Start a new export job
+   */
+  private async handleStart(exportId: string): Promise<Response> {
+    // Check if job already exists
+    const existing = this.getJob();
+    if (existing) {
+      return new Response(
+        JSON.stringify({ error: 'Job already exists', job_id: existing.id }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Fetch export from D1 to get metadata
+    const result = await this.env.DB.prepare(
+      'SELECT id, user_id, export_type, filter_params FROM storage_exports WHERE id = ?'
+    )
+      .bind(exportId)
+      .first<{
+        id: string;
+        user_id: string;
+        export_type: string;
+        filter_params: string | null;
+      }>();
+
+    if (!result) {
+      return new Response(
+        JSON.stringify({ error: `Export ${exportId} not found` }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Create job in SQLite
+    const r2Key = `exports/${result.user_id}/${exportId}/${Date.now()}-export.zip`;
+
+    this.sql.exec(
+      `INSERT INTO export_job (id, user_id, export_type, filter_params, status, r2_key)
+       VALUES (?, ?, ?, ?, 'running', ?)`,
+      exportId,
+      result.user_id,
+      result.export_type,
+      result.filter_params,
+      r2Key
+    );
+
+    // Update D1 to mark as processing
+    await this.env.DB.prepare(
+      "UPDATE storage_exports SET status = 'processing' WHERE id = ?"
+    )
+      .bind(exportId)
+      .run();
+
+    // Schedule first alarm immediately
+    await this.scheduleAlarm(0);
+
+    console.log('[ExportJob] Job started:', exportId, 'scheduled first alarm');
+
+    return new Response(
+      JSON.stringify({ job_id: exportId, status: 'running' }),
+      { status: 201, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  /**
+   * Get current job status
+   */
+  private handleGetStatus(): Response {
+    const job = this.getJob();
+    if (!job) {
+      return new Response(
+        JSON.stringify({ error: 'No job found' }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const fileCount = this.getProcessedFileCount();
+    const missingCount = this.getMissingFileCount();
+
+    return new Response(
+      JSON.stringify({
+        job_id: job.id,
+        status: job.status,
+        current_offset: job.current_offset,
+        total_size: job.total_size,
+        file_count: fileCount,
+        missing_files: missingCount,
+        r2_key: job.r2_key,
+        error: job.error,
+        created_at: job.created_at,
+        updated_at: job.updated_at
+      }),
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  /**
+   * Reset DO state (clear all tables)
+   */
+  private async handleReset(): Promise<Response> {
+    this.sql.exec('DELETE FROM export_job');
+    this.sql.exec('DELETE FROM export_files');
+    this.sql.exec('DELETE FROM export_missing');
+
+    console.log('[ExportJob] DO state cleared via reset action');
+
+    return new Response(
+      JSON.stringify({ success: true, message: 'DO state cleared' }),
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  /**
+   * Process export synchronously (fallback for cron-based processing)
+   */
+  private async handleProcessSync(exportId: string): Promise<Response> {
+    // Check if already processing
+    let job = this.getJob();
+
+    if (!job) {
+      // Initialize the job first
+      const startResponse = await this.handleStart(exportId);
+      if (startResponse.status !== 201) {
+        return startResponse;
+      }
+      job = this.getJob();
+    }
+
+    if (!job) {
+      return new Response(
+        JSON.stringify({ error: 'Failed to create job' }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Ensure status is running
+    if (job.status !== 'running') {
+      this.updateJobStatus('running');
+    }
+
+    try {
+      // Process all chunks synchronously
+      let hasMoreChunks = true;
+      while (hasMoreChunks) {
+        hasMoreChunks = await this.processChunk(job);
+        job = this.getJob()!; // Refresh job state
+        console.log('[ExportJob] Sync chunk processed, hasMore:', hasMoreChunks, 'files:', this.getProcessedFileCount());
+      }
+
+      // Finalize
+      await this.finalizeExport(job);
+
+      return new Response(
+        JSON.stringify({ success: true, message: 'Export processed' }),
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+    } catch (error) {
+      console.error('[ExportJob] Sync processing error:', error);
+      this.updateJobStatus('failed', String(error));
+      await this.updateD1Status(job.id, 'failed', String(error));
+
+      return new Response(
+        JSON.stringify({ success: false, error: String(error) }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+  }
+
+  // ============================================================================
+  // Helper methods
+  // ============================================================================
+
+  /**
+   * Get job from SQLite
+   */
+  private getJob(): {
+    id: string;
+    user_id: string;
+    export_type: string;
+    filter_params: string | null;
+    status: ExportStatus;
+    current_offset: number;
+    total_size: number;
+    file_count: number;
+    r2_key: string;
+    error: string | null;
+    created_at: string;
+    updated_at: string;
+  } | null {
+    const rows = this.sql.exec<{
+      id: string;
+      user_id: string;
+      export_type: string;
+      filter_params: string | null;
+      status: string;
+      current_offset: number;
+      total_size: number;
+      file_count: number;
+      r2_key: string;
+      error: string | null;
+      created_at: string;
+      updated_at: string;
+    }>('SELECT * FROM export_job LIMIT 1').toArray();
+
+    if (rows.length === 0) return null;
+
+    const row = rows[0];
+    return {
+      ...row,
+      status: row.status as ExportStatus
+    };
+  }
+
+  /**
+   * Update job status in SQLite
+   */
+  private updateJobStatus(status: ExportStatus, error?: string): void {
+    if (error) {
+      this.sql.exec(
+        `UPDATE export_job SET status = ?, error = ?, updated_at = datetime('now')`,
+        status,
+        error
+      );
+    } else {
+      this.sql.exec(
+        `UPDATE export_job SET status = ?, updated_at = datetime('now')`,
+        status
+      );
+    }
+  }
+
+  /**
+   * Update job offset after processing a chunk
+   */
+  private updateJobOffset(offset: number, totalSize: number): void {
+    this.sql.exec(
+      `UPDATE export_job SET current_offset = ?, total_size = ?, updated_at = datetime('now')`,
+      offset,
+      totalSize
+    );
+  }
+
+  /**
+   * Schedule an alarm
+   */
+  private async scheduleAlarm(delayMs: number): Promise<void> {
+    const time = Date.now() + delayMs;
+    await this.ctx.storage.setAlarm(time);
+    console.log(`[ExportJob] Scheduled alarm for ${new Date(time).toISOString()}`);
+  }
+
+  /**
+   * Get count of processed files
+   */
+  private getProcessedFileCount(): number {
+    const result = this.sql.exec<{ count: number }>(
+      'SELECT COUNT(*) as count FROM export_files'
+    ).toArray();
+    return result[0]?.count ?? 0;
+  }
+
+  /**
+   * Get count of missing files
+   */
+  private getMissingFileCount(): number {
+    const result = this.sql.exec<{ count: number }>(
+      'SELECT COUNT(*) as count FROM export_missing'
+    ).toArray();
+    return result[0]?.count ?? 0;
+  }
+
+  /**
+   * Get all processed files
+   */
+  private getProcessedFiles(): ProcessedFile[] {
+    const rows = this.sql.exec<{
+      file_id: string;
+      r2_key: string;
+      filename: string;
+      size_bytes: number;
+      product: string;
+      category: string;
+    }>('SELECT file_id, r2_key, filename, size_bytes, product, category FROM export_files').toArray();
+
+    return rows.map(r => ({
+      id: r.file_id,
+      r2_key: r.r2_key,
+      filename: r.filename,
+      size_bytes: r.size_bytes,
+      product: r.product,
+      category: r.category
+    }));
+  }
+
+  /**
+   * Save a processed file
+   */
+  private saveProcessedFile(file: ProcessedFile): void {
+    this.sql.exec(
+      `INSERT INTO export_files (file_id, r2_key, filename, size_bytes, product, category)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      file.id,
+      file.r2_key,
+      file.filename,
+      file.size_bytes,
+      file.product,
+      file.category
+    );
+  }
+
+  /**
+   * Save a missing file
+   */
+  private saveMissingFile(r2Key: string): void {
+    this.sql.exec(
+      'INSERT INTO export_missing (r2_key) VALUES (?)',
+      r2Key
+    );
+  }
+
+  /**
+   * Update D1 status (external database)
+   */
+  private async updateD1Status(exportId: string, status: string, error?: string): Promise<void> {
+    if (error) {
+      await this.env.DB.prepare(
+        `UPDATE storage_exports SET status = ?, error_message = ? WHERE id = ?`
+      )
+        .bind(status, error, exportId)
+        .run();
+    } else {
+      await this.env.DB.prepare(
+        `UPDATE storage_exports SET status = ? WHERE id = ?`
+      )
+        .bind(status, exportId)
+        .run();
+    }
+  }
+
+  // ============================================================================
+  // Core processing logic
+  // ============================================================================
+
+  /**
    * Process a single chunk of files
-   * Fetches up to 100 files or 50MB of data
    * Returns true if more chunks exist
    */
-  async processChunk(state: ExportState): Promise<boolean> {
-    // Build query based on export type
-    const query = this.buildFileQuery(state.userId, state.exportType, state.filterParams);
+  private async processChunk(job: {
+    id: string;
+    user_id: string;
+    export_type: string;
+    filter_params: string | null;
+    current_offset: number;
+    total_size: number;
+  }): Promise<boolean> {
+    const filters = job.filter_params ? JSON.parse(job.filter_params) : null;
+    const query = this.buildFileQuery(job.user_id, job.export_type, filters);
     const [baseQuery, params] = query;
 
-    // Fetch batch of files (100 files OR 50MB)
+    // Fetch batch of files
     const files = await this.env.DB.prepare(
       `${baseQuery} LIMIT ? OFFSET ?`
     )
-      .bind(...params, ZIP_CONFIG.CHUNK_FILE_LIMIT, state.currentOffset)
+      .bind(...params, ZIP_CONFIG.CHUNK_FILE_LIMIT, job.current_offset)
       .all<FileRecord>();
 
     if (!files.results || files.results.length === 0) {
       return false; // No more files
     }
 
-    // Fetch files from R2 in parallel batches of 10
+    let chunkSize = job.total_size;
+
+    // Process files in parallel batches of 10
     const batchSize = 10;
     for (let i = 0; i < files.results.length; i += batchSize) {
       const batch = files.results.slice(i, i + batchSize);
@@ -285,12 +567,12 @@ export class ExportJob extends DurableObject<Env> {
         try {
           const object = await this.env.R2_BUCKET.head(file.r2_key);
           if (!object) {
-            state.missingFiles.push(file.r2_key);
+            this.saveMissingFile(file.r2_key);
             return;
           }
 
           // Store file metadata for later zipping
-          state.processedFiles.push({
+          this.saveProcessedFile({
             id: file.id,
             r2_key: file.r2_key,
             filename: file.filename,
@@ -299,48 +581,52 @@ export class ExportJob extends DurableObject<Env> {
             category: file.category
           });
 
-          state.totalSize += file.size_bytes;
+          chunkSize += file.size_bytes;
         } catch (error) {
           console.warn(`Failed to check file ${file.r2_key}:`, error);
-          state.missingFiles.push(file.r2_key);
+          this.saveMissingFile(file.r2_key);
         }
       });
 
       await Promise.all(promises);
     }
 
-    // Log missing files
-    if (state.missingFiles.length > 0) {
-      console.info(
-        `Export ${state.exportId}: ${state.missingFiles.length} files missing in R2`
-      );
+    // Update offset
+    const newOffset = job.current_offset + files.results.length;
+    this.updateJobOffset(newOffset, chunkSize);
+
+    // Log missing files count
+    const missingCount = this.getMissingFileCount();
+    if (missingCount > 0) {
+      console.info(`Export ${job.id}: ${missingCount} files missing in R2`);
     }
 
-    // Check if we've exceeded chunk size limit
-    if (state.totalSize >= ZIP_CONFIG.CHUNK_SIZE_BYTES) {
-      state.currentOffset += files.results.length;
-      return true; // More chunks needed
+    // Check if we've exceeded chunk size limit or got all files
+    if (chunkSize >= ZIP_CONFIG.CHUNK_SIZE_BYTES) {
+      return true; // More chunks needed (size limit)
     }
 
-    // Check if we got fewer files than requested
     if (files.results.length < ZIP_CONFIG.CHUNK_FILE_LIMIT) {
       return false; // No more files available
     }
 
-    // Update offset for next chunk
-    state.currentOffset += files.results.length;
     return true; // More chunks available
   }
 
   /**
    * Finalize export by streaming all files to ZIP and uploading to R2
-   * Uses multipart upload to handle large exports without memory issues
    */
-  async finalizeExport(state: ExportState): Promise<void> {
-    console.log('[ExportJob] Finalizing export, creating ZIP with', state.processedFiles.length, 'files');
+  private async finalizeExport(job: {
+    id: string;
+    user_id: string;
+    r2_key: string;
+    export_type: string;
+  }): Promise<void> {
+    const processedFiles = this.getProcessedFiles();
+    console.log('[ExportJob] Finalizing export, creating ZIP with', processedFiles.length, 'files');
 
-    // Handle empty export - no files to zip
-    if (state.processedFiles.length === 0) {
+    // Handle empty export
+    if (processedFiles.length === 0) {
       console.log('[ExportJob] No files to export, marking as completed with 0 files');
       const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
       await this.env.DB.prepare(
@@ -348,22 +634,22 @@ export class ExportJob extends DurableObject<Env> {
          SET status = 'completed', r2_key = NULL, expires_at = ?, size_bytes = 0, file_count = 0
          WHERE id = ?`
       )
-        .bind(expiresAt, state.exportId)
+        .bind(expiresAt, job.id)
         .run();
-      console.info(`Export ${state.exportId} completed with 0 files (all files missing in R2)`);
+      this.updateJobStatus('completed');
+      console.info(`Export ${job.id} completed with 0 files (all files missing in R2)`);
       return;
     }
 
     const MIN_PART_SIZE = 5 * 1024 * 1024; // 5MB minimum per part (R2 requirement)
 
     // Create multipart upload
-    const multipartUpload = await this.env.R2_BUCKET.createMultipartUpload(state.r2Key, {
+    const multipartUpload = await this.env.R2_BUCKET.createMultipartUpload(job.r2_key, {
       customMetadata: {
-        'export-id': state.exportId,
-        'user-id': state.userId,
-        'export-type': state.exportType,
-        'file-count': state.processedFiles.length.toString(),
-        'total-size': state.totalSize.toString()
+        'export-id': job.id,
+        'user-id': job.user_id,
+        'export-type': job.export_type,
+        'file-count': processedFiles.length.toString()
       }
     });
 
@@ -380,7 +666,7 @@ export class ExportJob extends DurableObject<Env> {
       if (currentBufferSize === 0) return;
       if (!isLast && currentBufferSize < MIN_PART_SIZE) return;
 
-      // Combine buffer chunks into single Uint8Array
+      // Combine buffer chunks
       const combined = new Uint8Array(currentBufferSize);
       let offset = 0;
       for (const chunk of currentBuffer) {
@@ -402,11 +688,10 @@ export class ExportJob extends DurableObject<Env> {
     const zipStreamer = new ZipStreamer(writable);
 
     // Add README
-    console.log('[ExportJob] Adding README.txt');
     await zipStreamer.addTextFile('README.txt', createReadme());
 
-    // Create manifest from processed files
-    const manifestEntries = state.processedFiles.map((file) => ({
+    // Create manifest
+    const manifestEntries = processedFiles.map((file) => ({
       filename: file.filename,
       size: file.size_bytes,
       r2_key: file.r2_key,
@@ -414,11 +699,10 @@ export class ExportJob extends DurableObject<Env> {
       category: file.category
     }));
     await zipStreamer.addTextFile('manifest.json', createManifest(manifestEntries));
-    console.log('[ExportJob] Added manifest.json');
 
     // Stream files into ZIP
-    console.log('[ExportJob] Streaming', state.processedFiles.length, 'files into ZIP');
-    for (const file of state.processedFiles) {
+    console.log('[ExportJob] Streaming', processedFiles.length, 'files into ZIP');
+    for (const file of processedFiles) {
       const object = await this.env.R2_BUCKET.get(file.r2_key);
       if (!object?.body) {
         console.warn(`Skipping file ${file.r2_key} - not found during finalization`);
@@ -433,75 +717,52 @@ export class ExportJob extends DurableObject<Env> {
       });
     }
 
-    console.log('[ExportJob] Closing ZIP stream');
+    // Close ZIP stream
     await zipStreamer.close();
-    console.log('[ExportJob] ZIP stream closed, starting upload processing');
 
-    // NOW set up stream reading and multipart upload AFTER ZIP is fully written
-    // Read chunks and buffer for multipart upload
+    // Read from stream and upload parts
     const reader = readable.getReader();
-    const processStream = async (): Promise<void> => {
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          currentBuffer.push(value);
-          currentBufferSize += value.length;
-          // Upload when we have enough data
-          if (currentBufferSize >= MIN_PART_SIZE) {
-            await uploadPart(false);
-          }
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        currentBuffer.push(value);
+        currentBufferSize += value.length;
+        if (currentBufferSize >= MIN_PART_SIZE) {
+          await uploadPart(false);
         }
-        // Upload final part (can be < 5MB)
-        await uploadPart(true);
-      } finally {
-        reader.releaseLock();
       }
-    };
-
-    // Start stream processing and wait for it to complete
-    console.log('[ExportJob] Starting stream processing');
-    await processStream();
-    console.log('[ExportJob] Stream processing complete');
+      // Upload final part
+      await uploadPart(true);
+    } finally {
+      reader.releaseLock();
+    }
 
     console.log(`[ExportJob] Uploaded ${uploadedParts.length} parts, completing multipart upload...`);
 
     // Complete multipart upload
     await multipartUpload.complete(uploadedParts);
 
-    // Update D1 to mark as completed with size and file count
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // +7 days
+    // Update D1 to mark as completed
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
     await this.env.DB.prepare(
       `UPDATE storage_exports
        SET status = 'completed', r2_key = ?, expires_at = ?, size_bytes = ?, file_count = ?
        WHERE id = ?`
     )
-      .bind(state.r2Key, expiresAt, totalBytesUploaded, state.processedFiles.length, state.exportId)
+      .bind(job.r2_key, expiresAt, totalBytesUploaded, processedFiles.length, job.id)
       .run();
 
+    // Update DO status
+    this.updateJobStatus('completed');
+
     console.info(
-      `Export ${state.exportId} completed: ${state.processedFiles.length} files, ${totalBytesUploaded} bytes (ZIP)`
+      `Export ${job.id} completed: ${processedFiles.length} files, ${totalBytesUploaded} bytes (ZIP)`
     );
   }
 
   /**
-   * Handle export failure by updating D1 status
-   */
-  async handleFailure(state: ExportState, error: Error): Promise<void> {
-    console.error(`Export ${state.exportId} failed:`, error);
-
-    await this.env.DB.prepare(
-      `UPDATE storage_exports
-       SET status = 'failed', error_message = ?
-       WHERE id = ?`
-    )
-      .bind(error.message, state.exportId)
-      .run();
-  }
-
-  /**
    * Build D1 query based on export type and filters
-   * Returns [queryString, params] tuple
    */
   private buildFileQuery(
     userId: string,
@@ -514,16 +775,12 @@ export class ExportJob extends DurableObject<Env> {
       WHERE user_id = ? AND deleted_at IS NULL
     `;
 
-    const params: unknown[] = [];
-
-    // User ID for the WHERE clause
-    params.push(userId);
+    const params: unknown[] = [userId];
 
     let typeCondition = '';
 
     switch (exportType) {
       case 'full':
-        // Export everything
         typeCondition = '';
         break;
       case 'blog':
@@ -545,9 +802,3 @@ export class ExportJob extends DurableObject<Env> {
     return [baseQuery + typeCondition + ' ORDER BY created_at DESC', params];
   }
 }
-
-/**
- * TODO: Add R2 utilities to @autumnsgrove/groveengine
- * Consider extracting file streaming, chunking, and ZIP creation
- * utilities into groveengine for reuse across projects
- */

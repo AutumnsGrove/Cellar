@@ -37,6 +37,18 @@ tag = "v3"
 renamed_classes = []
 deleted_classes = []
 
+# v4: Enable SQLite storage for ExportJob (migrating from KV to SQL)
+# This enables state.storage.sql for persistent, reliable state management
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["ExportJob"]
+
+# Durable Objects observability (logs to CF dashboard)
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+
 # Cron Triggers
 [triggers]
 crons = ["*/5 * * * *", "0 3 * * *"]  # Daily at 3 AM UTC

@@ -183,44 +183,57 @@ The following is implemented and ready:
 
 ## Next Steps
 
-### IMMEDIATE - Export System Final Testing (Dec 21, 2024)
+### IMMEDIATE - Export System SQLite Migration (Dec 22, 2024)
 
-**Status:** Export system code complete. Major bugs fixed. Testing in progress.
+**Status:** Migrating from KV storage to SQLite storage based on Forage analysis.
 
-**Session Progress (Dec 21):**
-- ✅ Fixed critical `user_id` bug - `buildFileQuery()` was pushing empty string, now passes actual userId
-- ✅ Fixed fflate Web Workers issue - Switched from `AsyncZipDeflate` to synchronous `ZipDeflate`
+**Problem Identified (Dec 22):**
+After analyzing the successful Forage project's Durable Object implementation, we identified
+the root cause of Amber's export reliability issues:
+
+| Issue | Amber (Broken) | Forage (Working) |
+|-------|----------------|------------------|
+| Storage | KV (`ctx.storage.put/get`) | SQLite (`state.storage.sql`) |
+| Migration | `new_classes` | `new_sqlite_classes` |
+| State | JSON blob (unreliable) | SQL tables (persistent) |
+| Alarms | Marked deprecated | Fully functional |
+
+**Key Insight:** Forage uses `new_sqlite_classes` in wrangler.toml migrations, which enables
+the built-in SQLite storage. This makes state persistence rock-solid and alarms reliable.
+
+**Migration Plan:**
+1. ✅ Analyzed Forage's DO pattern (cloned to /tmp/Forage)
+2. [ ] Add `new_sqlite_classes` migration to wrangler.toml
+3. [ ] Refactor ExportJob to use SQLite with proper schema:
+   - `export_job` table for job metadata and status
+   - `export_files` table for processed files
+   - `export_missing` table for missing R2 files
+4. [ ] Re-enable alarm-based processing (now reliable with SQLite)
+5. [ ] Add observability config to wrangler.toml
+6. [ ] Deploy and test
+
+**Forage Patterns to Adopt:**
+- `ensureSchema()` method to create SQL tables on first access
+- `getJob()` helper to query job state from SQL
+- `updateJobStatus()` for atomic status updates
+- `scheduleAlarm()` wrapper for consistent alarm scheduling
+- Status field in SQL prevents duplicate processing
+- Batch number tracking survives DO hibernation
+
+**Previous Session Progress (Dec 21):**
+- ✅ Fixed critical `user_id` bug - `buildFileQuery()` was pushing empty string
+- ✅ Fixed fflate Web Workers issue - Switched to synchronous `ZipDeflate`
 - ✅ Fixed stream deadlock - Moved reader initialization after zip close
 - ✅ Implemented R2 multipart upload - Handles 50GB+ exports with 5MB chunks
 - ✅ Added DO reset endpoint (`?action=reset`) for clearing stale state
 - ✅ Added synchronous processing (`?action=process-sync`) for DO
 - ✅ Set up cron fallback - Every 5 min processes pending/stuck exports
-- ✅ Added test endpoint (`POST /api/storage/export/trigger-cron`) for manual testing
-- ✅ Updated D1 with `size_bytes` and `file_count` on completion
 
-**Current Architecture:**
-1. POST /api/storage/export creates job → D1 `pending`
-2. `ctx.waitUntil()` fires DO `process-sync` (may timeout)
-3. Cron every 5 min picks up `pending` OR stuck `processing` (>2 min, no r2_key)
-4. DO processes files, streams ZIP to R2 via multipart upload
-5. Finalizes: updates D1 with `completed`, `r2_key`, `size_bytes`, `file_count`
-
-**Known Limitation:** Worker 30s timeout may interrupt large exports. Cron retry handles this.
-
-**Next Session TODO:**
-1. **Run end-to-end test**
-   - Clear old export: `DELETE FROM storage_exports WHERE user_id = 'test-user-123'`
-   - Trigger new export
-   - Trigger cron manually: `POST /api/storage/export/trigger-cron`
-   - Verify export completes in D1
-   - Test download endpoint
-
-2. **If still failing:**
-   - Check Cloudflare Dashboard logs
-   - Add more error logging if needed
-
-**Testing Commands:**
+**Testing Commands (after migration):**
 ```bash
+# Deploy with new SQLite migration
+cd worker && npx wrangler deploy
+
 # Clear test exports
 npx wrangler d1 execute amber --remote --command \
   "DELETE FROM storage_exports WHERE user_id = 'test-user-123'"
@@ -230,10 +243,6 @@ curl -X POST https://amber-worker.m7jv4v7npb.workers.dev/api/storage/export \
   -H "X-Test-User-ID: test-user-123" \
   -H "Content-Type: application/json" \
   -d '{"type":"full"}'
-
-# Trigger cron manually
-curl -X POST https://amber-worker.m7jv4v7npb.workers.dev/api/storage/export/trigger-cron \
-  -H "X-Test-User-ID: test-user-123"
 
 # Check export status
 npx wrangler d1 execute amber --remote --command \
