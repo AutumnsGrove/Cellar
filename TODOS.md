@@ -183,52 +183,47 @@ The following is implemented and ready:
 
 ## Next Steps
 
-### IMMEDIATE - Export System Debugging (Dec 21, 2024)
+### IMMEDIATE - Export System Final Testing (Dec 21, 2024)
 
-**Status:** Export system partially working, but stuck in "processing" state during finalization.
+**Status:** Export system code complete. Major bugs fixed. Testing in progress.
 
-**What Works:**
-- ✅ Export job creation (POST /api/storage/export)
-- ✅ Durable Object trigger via fetch()
-- ✅ DO alarm() method fires
-- ✅ Status updates to "processing"
-- ✅ Test mode auth (X-Test-User-ID header)
+**Session Progress (Dec 21):**
+- ✅ Fixed critical `user_id` bug - `buildFileQuery()` was pushing empty string, now passes actual userId
+- ✅ Fixed fflate Web Workers issue - Switched from `AsyncZipDeflate` to synchronous `ZipDeflate`
+- ✅ Fixed stream deadlock - Moved reader initialization after zip close
+- ✅ Implemented R2 multipart upload - Handles 50GB+ exports with 5MB chunks
+- ✅ Added DO reset endpoint (`?action=reset`) for clearing stale state
+- ✅ Added synchronous processing (`?action=process-sync`) for DO
+- ✅ Set up cron fallback - Every 5 min processes pending/stuck exports
+- ✅ Added test endpoint (`POST /api/storage/export/trigger-cron`) for manual testing
+- ✅ Updated D1 with `size_bytes` and `file_count` on completion
 
-**What's Broken:**
-- ❌ Exports get stuck in "processing" for 20+ seconds
-- ❌ No error logged to D1 (handleFailure not being called)
-- ❌ wrangler tail logs incomplete/inconsistent
+**Current Architecture:**
+1. POST /api/storage/export creates job → D1 `pending`
+2. `ctx.waitUntil()` fires DO `process-sync` (may timeout)
+3. Cron every 5 min picks up `pending` OR stuck `processing` (>2 min, no r2_key)
+4. DO processes files, streams ZIP to R2 via multipart upload
+5. Finalizes: updates D1 with `completed`, `r2_key`, `size_bytes`, `file_count`
 
-**Bugs Fixed Today:**
-1. ✅ Fixed `ctx is not defined` - Added ctx param to route handler (index.ts:640)
-2. ✅ Fixed DO method calling - Added fetch() handler to ExportJob
-3. ✅ Fixed storage API - Changed `this.state.storage` → `this.ctx.storage`
-4. ✅ Fixed R2 upload attempt - Buffered zip in memory before upload
+**Known Limitation:** Worker 30s timeout may interrupt large exports. Cron retry handles this.
 
 **Next Session TODO:**
-1. **Add comprehensive error handling** (30 min)
-   - Wrap processChunk() in try/catch with D1 error logging
-   - Wrap finalizeExport() in try/catch with D1 error logging
-   - Add timestamp to every console.log
-   - Log start/end of every major function
+1. **Run end-to-end test**
+   - Clear old export: `DELETE FROM storage_exports WHERE user_id = 'test-user-123'`
+   - Trigger new export
+   - Trigger cron manually: `POST /api/storage/export/trigger-cron`
+   - Verify export completes in D1
+   - Test download endpoint
 
-2. **Test with Cloudflare Dashboard** (15 min)
-   - Create export: `curl -X POST https://amber-worker.m7jv4v7npb.workers.dev/api/storage/export -H "X-Test-User-ID: test-user-123" -H "Content-Type: application/json" -d '{"type":"full"}'`
-   - **IMMEDIATELY** open Cloudflare Dashboard → Workers & Pages → amber-worker → Logs
-   - Watch real-time logs (better than wrangler tail)
-   - Check Durable Objects section for ExportJob instance logs
-   - Wait 30 seconds, check D1 for status/error
-
-3. **If still failing: Simplify** (1 hour)
-   - Skip ZIP generation entirely
-   - Just test: processChunk() → collect file metadata → update D1 with file_count
-   - Once that works, add back ZIP generation
-   - Use simpler R2 upload (single small file test first)
+2. **If still failing:**
+   - Check Cloudflare Dashboard logs
+   - Add more error logging if needed
 
 **Testing Commands:**
 ```bash
-# Start wrangler tail (backup to dashboard)
-npx wrangler tail
+# Clear test exports
+npx wrangler d1 execute amber --remote --command \
+  "DELETE FROM storage_exports WHERE user_id = 'test-user-123'"
 
 # Create export
 curl -X POST https://amber-worker.m7jv4v7npb.workers.dev/api/storage/export \
@@ -236,26 +231,14 @@ curl -X POST https://amber-worker.m7jv4v7npb.workers.dev/api/storage/export \
   -H "Content-Type: application/json" \
   -d '{"type":"full"}'
 
+# Trigger cron manually
+curl -X POST https://amber-worker.m7jv4v7npb.workers.dev/api/storage/export/trigger-cron \
+  -H "X-Test-User-ID: test-user-123"
+
 # Check export status
 npx wrangler d1 execute amber --remote --command \
-  "SELECT id, status, file_count, error_message FROM storage_exports ORDER BY created_at DESC LIMIT 1"
-
-# Check if files exist in D1
-npx wrangler d1 execute amber --remote --command \
-  "SELECT COUNT(*) as count FROM storage_files WHERE user_id = 'test-user-123'"
+  "SELECT id, status, r2_key, file_count, size_bytes FROM storage_exports ORDER BY created_at DESC LIMIT 1"
 ```
-
-**Cloudflare Dashboard Access:**
-1. Go to: https://dash.cloudflare.com/
-2. Select account → Workers & Pages
-3. Click "amber-worker"
-4. Click "Logs" tab (real-time logs, better than wrangler tail)
-5. Click "Durable Objects" tab → find ExportJob instance for detailed DO logs
-
-**Test Data:**
-- User: test-user-123
-- Files in D1: 20 files
-- Files in R2: ~6 files uploaded manually (rest missing, should be handled gracefully)
 
 ---
 

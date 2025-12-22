@@ -677,22 +677,28 @@ route('POST', '/api/storage/export', async (request, env, ctx) => {
     )
     .run();
 
-  // Trigger export processing via Durable Object
+  // Trigger export processing via Durable Object (fire-and-forget)
   console.log('[Export] Triggering Durable Object for export:', exportId);
   const doId = env.EXPORT_JOBS.idFromName(exportId);
   const doStub = env.EXPORT_JOBS.get(doId);
-  console.log('[Export] DO stub created, calling fetch()');
 
-  // Start export in background (non-blocking)
-  const doRequest = new Request(`https://fake-host/?action=start&exportId=${exportId}`);
-  ctx.waitUntil(doStub.fetch(doRequest));
-  console.log('[Export] DO fetch() queued via ctx.waitUntil()');
+  // Use waitUntil to ensure DO runs even after response
+  const doRequest = new Request(`https://fake-host/?action=process-sync&exportId=${exportId}`);
+  ctx.waitUntil(
+    doStub.fetch(doRequest)
+      .then(async (res) => {
+        const result = await res.json();
+        console.log('[Export] DO processing result:', result);
+      })
+      .catch(err => console.error('[Export] DO trigger failed:', err))
+  );
+  console.log('[Export] DO triggered via waitUntil');
 
   return json({
     export_id: exportId,
     status: 'pending',
-    message: 'Export job created. You will receive an email when ready.'
-  });
+    message: 'Export job started. Poll GET /api/storage/export/:id for status.'
+  }, 202);
 });
 
 // GET /api/storage/export/:id - Get export status
@@ -741,6 +747,37 @@ route(
     });
   }
 );
+
+// POST /api/storage/export/trigger-cron - Manually trigger pending exports processing (TEST ONLY)
+route('POST', '/api/storage/export/trigger-cron', async (request, env, ctx) => {
+  // Only allow in test mode
+  const testUserId = request.headers.get('X-Test-User-ID');
+  if (!testUserId) {
+    return error('Test mode only - requires X-Test-User-ID header', 403);
+  }
+
+  console.log('[Test] Manually triggering processPendingExports');
+
+  // Run synchronously so we can return results
+  await processPendingExports(env);
+
+  // Get current export statuses for the test user
+  const exports = await env.DB.prepare(
+    `SELECT id, status, r2_key, file_count, size_bytes, created_at
+     FROM storage_exports
+     WHERE user_id = ?
+     ORDER BY created_at DESC
+     LIMIT 5`
+  )
+    .bind(testUserId)
+    .all();
+
+  return json({
+    success: true,
+    message: 'Cron triggered successfully',
+    exports: exports.results
+  });
+});
 
 // GET /api/storage/addons - List available and purchased add-ons
 route('GET', '/api/storage/addons', async (request, env) => {
@@ -1034,6 +1071,83 @@ async function deleteExpiredExports(env: Env): Promise<void> {
   }
 }
 
+/**
+ * Process pending exports by polling them and running in the DO
+ * This runs every 5 minutes via cron
+ */
+async function processPendingExports(env: Env): Promise<void> {
+  const startTime = Date.now();
+  console.log('[Cron] Starting pending export processing');
+
+  try {
+    // Get pending exports AND stuck processing exports (older than 2 min with no r2_key)
+    const pendingExports = await env.DB.prepare(
+      `SELECT id, user_id FROM storage_exports
+       WHERE status = 'pending'
+          OR (status = 'processing' AND r2_key IS NULL
+              AND created_at < datetime('now', '-2 minutes'))
+       ORDER BY created_at ASC
+       LIMIT 5`
+    ).all<{ id: string; user_id: string }>();
+
+    if (!pendingExports.results || pendingExports.results.length === 0) {
+      console.log('[Cron] No pending/stuck exports to process');
+      return;
+    }
+
+    console.log('[Cron] Found', pendingExports.results.length, 'exports to process');
+
+    // Process each pending export
+    for (const exp of pendingExports.results) {
+      try {
+        console.log('[Cron] Processing export:', exp.id);
+        
+        // Call the DO to process this export synchronously
+        const doId = env.EXPORT_JOBS.idFromName(exp.id);
+        const doStub = env.EXPORT_JOBS.get(doId);
+        const doRequest = new Request(`https://fake-host/?action=process-sync&exportId=${exp.id}`);
+        
+        // IMPORTANT: The DO fetch() will timeout if the export takes > 30 seconds
+        // This is a limitation of Cloudflare Workers
+        // For very large exports, they will continue to fail
+        try {
+          const response = await doStub.fetch(doRequest);
+          const result = await response.json<{ success: boolean; error?: string }>();
+          
+          if (result.success) {
+            console.log('[Cron] Export processed successfully:', exp.id);
+          } else {
+            console.error('[Cron] Export processing failed:', exp.id, result.error);
+          }
+        } catch (err) {
+          console.error('[Cron] DO fetch error for export', exp.id, ':', err);
+          // DO fetch timed out - the export may still be processing
+          // It will be retried on the next cron run
+        }
+      } catch (err) {
+        console.error('[Cron] Error processing export', exp.id, ':', err);
+      }
+    }
+
+    logCronEvent({
+      job: 'process_exports',
+      status: 'completed',
+      timestamp: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      items_processed: pendingExports.results.length
+    });
+  } catch (err) {
+    console.error('[Cron] Error in processPendingExports:', err);
+    logCronEvent({
+      job: 'process_exports',
+      status: 'failed',
+      timestamp: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      errors: [String(err)]
+    });
+  }
+}
+
 // ============== EXPORTS ==============
 
 export default {
@@ -1050,7 +1164,11 @@ export default {
     env: Env,
     ctx: ExecutionContext
   ): Promise<void> {
-    // Run both cleanup jobs at 3 AM UTC
+    // Process pending exports every 5 minutes
+    if (event.cron === '*/5 * * * *') {
+      ctx.waitUntil(processPendingExports(env));
+    }
+    // Run cleanup jobs at 3 AM UTC
     if (event.cron === '0 3 * * *') {
       ctx.waitUntil(deleteExpiredTrash(env));
       ctx.waitUntil(deleteExpiredExports(env));

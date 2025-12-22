@@ -39,7 +39,7 @@ deleted_classes = []
 
 # Cron Triggers
 [triggers]
-crons = ["0 3 * * *"]  # Daily at 3 AM UTC
+crons = ["*/5 * * * *", "0 3 * * *"]  # Daily at 3 AM UTC
 
 # Environment Variables
 [vars]

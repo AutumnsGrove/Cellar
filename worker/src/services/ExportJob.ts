@@ -61,9 +61,26 @@ export class ExportJob extends DurableObject<Env> {
 
     console.log('[ExportJob] fetch() called with action:', action, 'exportId:', exportId);
 
+    if (action === 'process-sync' && exportId) {
+      // Process synchronously (no alarms, runs immediately)
+      try {
+        await this.processExportSync(exportId);
+        return new Response(JSON.stringify({ success: true, message: 'Export processed' }), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } catch (error) {
+        console.error('[ExportJob] Sync processing error:', error);
+        return new Response(JSON.stringify({ success: false, error: String(error) }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
     if (action === 'start' && exportId) {
+      // Schedule alarm-based processing (DO runs independently of Worker request)
       await this.startExport(exportId);
-      return new Response(JSON.stringify({ success: true }), {
+      return new Response(JSON.stringify({ success: true, message: 'Export scheduled' }), {
         headers: { 'Content-Type': 'application/json' }
       });
     }
@@ -80,7 +97,72 @@ export class ExportJob extends DurableObject<Env> {
   }
 
   /**
+   * Process an export synchronously (bypasses unreliable alarm system)
+   */
+  async processExportSync(exportId: string): Promise<void> {
+    console.log('[ExportJob] processExportSync() called for export:', exportId);
+
+    // Fetch export from D1
+    const result = await this.env.DB.prepare(
+      'SELECT id, user_id, export_type, filter_params FROM storage_exports WHERE id = ?'
+    )
+      .bind(exportId)
+      .first<{
+        id: string;
+        user_id: string;
+        export_type: string;
+        filter_params: string | null;
+      }>();
+
+    if (!result) {
+      throw new Error(`Export ${exportId} not found`);
+    }
+
+    // Initialize state
+    const state: ExportState = {
+      exportId,
+      userId: result.user_id,
+      exportType: result.export_type as ExportState['exportType'],
+      filterParams: result.filter_params ? JSON.parse(result.filter_params) : null,
+      currentOffset: 0,
+      processedFiles: [],
+      totalSize: 0,
+      missingFiles: [],
+      r2Key: `exports/${result.user_id}/${exportId}/${Date.now()}-export.zip`,
+      createdAt: new Date().toISOString()
+    };
+
+    // Update D1 to mark as processing
+    console.log('[ExportJob] Updating status to processing');
+    await this.env.DB.prepare(
+      "UPDATE storage_exports SET status = 'processing' WHERE id = ?"
+    )
+      .bind(exportId)
+      .run();
+
+    try {
+      // Process all chunks until done
+      console.log('[ExportJob] Processing chunks...');
+      let hasMoreChunks = true;
+      while (hasMoreChunks) {
+        hasMoreChunks = await this.processChunk(state);
+        console.log('[ExportJob] Chunk processed, hasMore:', hasMoreChunks, 'files:', state.processedFiles.length);
+      }
+
+      // Finalize the export
+      console.log('[ExportJob] Finalizing export...');
+      await this.finalizeExport(state);
+      console.log('[ExportJob] Export completed successfully');
+    } catch (error) {
+      console.error('[ExportJob] Export failed:', error);
+      await this.handleFailure(state, error as Error);
+      throw error;
+    }
+  }
+
+  /**
    * Start an export job by fetching metadata and scheduling processing
+   * @deprecated Use processExportSync instead - alarms are unreliable
    */
   async startExport(exportId: string): Promise<void> {
     console.log('[ExportJob] startExport() called for export:', exportId);
